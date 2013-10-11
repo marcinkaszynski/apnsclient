@@ -8,7 +8,7 @@ You will need `Apple's developer account
 your provider's certificate. The certificate must be in ``PEM`` format. You may
 keep the private key with your certificate or in a separate file. Read `the
 APNs manual
-<http://developer.apple.com/library/mac/#documentation/NetworkingInternet/Conceptual/RemoteNotificationsPG/ApplePushService/ApplePushService.html>`_
+<https://developer.apple.com/library/mac/documentation/NetworkingInternet/Conceptual/RemoteNotificationsPG/Chapters/ApplePushService.html#//apple_ref/doc/uid/TP40008194-CH100-SW9>`_
 to understand its architecture and all implications. This library hides most of
 the complex mechanics behind APNs protocol, but some aspects, such as
 constructing the payload or interpreting the error codes is left to you.

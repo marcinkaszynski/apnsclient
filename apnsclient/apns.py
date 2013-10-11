@@ -716,7 +716,7 @@ class Message(object):
         """ The push notification to one or more device tokens.
 
             Read more `about payload
-            <https://developer.apple.com/library/ios/documentation/NetworkingInternet/Conceptual/RemoteNotificationsPG/Chapters/ApplePushService.html#//apple_ref/doc/uid/TP40008194-CH100-SW1`_.
+            <https://developer.apple.com/library/mac/documentation/NetworkingInternet/Conceptual/RemoteNotificationsPG/Chapters/ApplePushService.html#//apple_ref/doc/uid/TP40008194-CH100-SW1>`_.
 
             :Arguments:
                 - `tokens` (str or list): set of device tokens where to message will be sent.

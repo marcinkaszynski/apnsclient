@@ -1,6 +1,6 @@
 APNs Client |release| documentation.
 ====================================
-Python client for `Apple Push Notification service (APNs) <http://developer.apple.com/library/mac/#documentation/NetworkingInternet/Conceptual/RemoteNotificationsPG/ApplePushService/ApplePushService.html>`_.
+Python client for `Apple Push Notification service (APNs) <https://developer.apple.com/library/mac/documentation/NetworkingInternet/Conceptual/RemoteNotificationsPG/Introduction.html#//apple_ref/doc/uid/TP40008194-CH1-SW1>`_.
 
 Check out the client with similar interface for `Google Cloud Messaging <https://pypi.python.org/pypi/gcm-client/>`_.
 
