@@ -712,7 +712,7 @@ class Message(object):
         'ensure_ascii': False,
     }
 
-    def __init__(self, tokens, alert=None, badge=None, sound=None, content_available=None, expiry=None, payload=None, **extra):
+    def __init__(self, tokens, alert=None, badge=None, sound=None, content_available=None, expiry=None, payload=None, priority=10, **extra):
         """ The push notification to one or more device tokens.
 
             Read more `about payload
@@ -729,6 +729,7 @@ class Message(object):
                                     complete message payload. If supplied, it
                                     is given instead of all the other, more
                                     specific parameters.
+                - `priority` (int): priority of th emessage, 10 (default) or 5.
                 - `extra` (kwargs): extra payload key-value pairs.
         """
         if (payload is not None and (
@@ -745,6 +746,7 @@ class Message(object):
         self.badge = badge
         self.sound = sound
         self.content_available = content_available
+        self.priority = priority
         self.extra = extra
         self._payload = payload
 
@@ -792,9 +794,10 @@ class Message(object):
                 'payload': self._payload,
                 'tokens': self.tokens,
                 'expiry': self.expiry,
+                'priority': self.priority,
             }
 
-        ret = dict((key, getattr(self, key)) for key in ('tokens', 'alert', 'badge', 'sound', 'content_available', 'expiry'))
+        ret = dict((key, getattr(self, key)) for key in ('tokens', 'alert', 'badge', 'sound', 'content_available', 'expiry', 'priority'))
         if self.extra:
             ret.update(self.extra)
 
@@ -805,6 +808,7 @@ class Message(object):
         self._tokens = state['tokens']
         self.extra = {}
         self.expiry = state['expiry']
+        self.priority = state['priority']
 
         if 'payload' in state:
             self._payload = state['payload']
@@ -817,7 +821,7 @@ class Message(object):
             for key, val in state.iteritems():
                 if key in ('tokens', 'expiry'): # already set
                     pass
-                elif key in ('alert', 'badge', 'sound', 'content_available'):
+                elif key in ('alert', 'badge', 'sound', 'content_available', 'priority'):
                     setattr(self, key, state[key])
                 else:
                     self.extra[key] = val
@@ -833,10 +837,12 @@ class Message(object):
         if self._payload is not None:
             return self._payload
         
-        aps = {
-            # XXX: we do not check alert, which could be string or dict with extra options
-            'alert': self.alert
-        }
+        # in v.2 protocol no keys are required, but usually you specify
+        # alert or content-available.
+        aps = {}
+
+        if self.alert:
+            aps['alert'] = self.alert
 
         if self.badge is not None:
             aps['badge'] = self.badge
@@ -867,7 +873,7 @@ class Message(object):
     def batch(self, packet_size):
         """ Returns binary serializer. """
         payload = self.get_json_payload()
-        return Batch(self._tokens, payload, self.expiry, packet_size)
+        return Batch(self._tokens, payload, self.expiry, self.priority, packet_size)
 
     def retry(self, failed_index, include_failed):
         """ Create new retry message with tokens from failed index. """
@@ -879,24 +885,28 @@ class Message(object):
             # nothing to retry
             return None
 
-        return Message(failed, self.alert, badge=self.badge, sound=self.sound, content_available=self.content_available, expiry=self.expiry, **self.extra)
+        return Message(failed, self.alert, badge=self.badge, sound=self.sound,
+                    content_available=self.content_available, expiry=self.expiry,
+                    priority=self.priority, **self.extra)
 
 
 class Batch(object):
     """ Binary stream serializer. """
 
-    def __init__(self, tokens, payload, expiry, packet_size):
+    def __init__(self, tokens, payload, expiry, priority, packet_size):
         """ New serializer.
 
             :Arguments:
                 - `tokens` (list): list of target target device tokens.
                 - `payload` (str): JSON payload.
                 - `expiry` (int): expiry timestamp.
+                - `priority` (int): message priority.
                 - `packet_size` (int): minimum chunk size in bytes.
         """
         self.tokens = tokens
         self.payload = payload
         self.expiry = expiry
+        self.priority = priority
         self.packet_size = packet_size
         
     def __iter__(self):
@@ -908,12 +918,19 @@ class Batch(object):
         # for all registration ids
         for idx, token in enumerate(self.tokens):
             tok = token.decode("hex")
-            # |COMMAND|ID|EXPIRY|TOKENLEN|TOKEN|PAYLOADLEN|PAYLOAD|
-            fmt = ">BIIH%ssH%ss" % (len(tok), len(self.payload))
-            message = pack(fmt, 1, idx, self.expiry, len(tok), tok, len(self.payload), self.payload)
+            # |COMMAND|FRAME-LEN|{token}|{payload}|{id:4}|{expiry:4}|{priority:1}
+            frame_len = 3*5 + len(tok) + len(self.payload) + 4 + 4 + 1 # 5 items, each 3 bytes prefix, then each item length
+            fmt = ">BIBH%ssBH%ssBHIBHIBHB" % (len(tok), len(self.payload))
+            message = pack(fmt, 2, frame_len,
+                    1, len(tok), tok,
+                    2, len(self.payload), self.payload,
+                    3, 4, idx,
+                    4, 4, self.expiry,
+                    5, 1, self.priority)
+
             messages.append(message)
             buf += len(message)
-            if buf > self.packet_size:
+            if buf >= self.packet_size:
                 chunk = "".join(messages)
                 buf = 0
                 prev_sent = sent
@@ -938,6 +955,7 @@ class Result(object):
         6: ('Invalid topic size', False, True), # can not happen, we do not send topic, it is part of certificate. bail out.
         7: ('Invalid payload size', False, True), # our payload is probably too big. bail out.
         8: ('Invalid token', True, False), # our device token is broken, skipt it and retry
+        10: ('Shutdown', True, None), # server went into maintenance mode. reported token is the last success, skip it and retry.
         None: ('Unknown', True, True), # unknown error, for sure we try again, but user should limit number of retries
     }
 
@@ -959,7 +977,7 @@ class Result(object):
                 # may be None if failed on last token, which is skipped
                 self._retry_message = message.retry(failed_index, include_failed)
 
-            if not include_failed: # report broken token, it was skipped
+            if include_failed is False: # report broken token, it was skipped
                 self._failed = {
                     message.tokens[failed_index]: (reason, expl)
                 }

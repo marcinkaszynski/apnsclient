@@ -81,7 +81,7 @@ class APNsClientMessageTest(unittest.TestCase):
     def setUp(self):
         self.uni = Message("0123456789ABCDEF", alert="alert", badge=10, content_available=1)
         self.multi = Message(["0123456789ABCDEF", "FEDCBA9876543210"], alert="my alerrt", sound="cool.mp3", content_available=1, my_extra=15)
-        self.payload = Message(["0123456789ABCDEF", "FEDCBA9876543210"], payload=self.uni.payload)
+        self.payload = Message(["0123456789ABCDEF", "FEDCBA9876543210"], payload=self.uni.payload, priority=5)
 
     def test_serialization(self):
         # standard pickle
@@ -93,7 +93,7 @@ class APNsClientMessageTest(unittest.TestCase):
         cmulti = pickle.loads(smulti)
         cpayload = pickle.loads(spayload)
 
-        for key in ('tokens', 'alert', 'badge', 'sound', 'content_available', 'expiry', 'extra', '_payload'):
+        for key in ('tokens', 'alert', 'badge', 'sound', 'content_available', 'expiry', 'extra', 'priority', '_payload'):
             self.assertEqual(getattr(self.uni, key), getattr(cuni, key))
             self.assertEqual(getattr(self.multi, key), getattr(cmulti, key))
             self.assertEqual(getattr(self.payload, key), getattr(cpayload, key))
@@ -115,7 +115,7 @@ class APNsClientMessageTest(unittest.TestCase):
         cmulti = Message(**smulti)
         cpayload = Message(**spayload)
 
-        for key in ('tokens', 'alert', 'badge', 'sound', 'content_available', 'expiry', 'extra', '_payload'):
+        for key in ('tokens', 'alert', 'badge', 'sound', 'content_available', 'expiry', 'extra', 'priority', '_payload'):
             self.assertEqual(getattr(self.uni, key), getattr(cuni, key))
             self.assertEqual(getattr(self.multi, key), getattr(cmulti, key))
             self.assertEqual(getattr(self.payload, key), getattr(cpayload, key))
@@ -138,27 +138,46 @@ class APNsClientMessageTest(unittest.TestCase):
         sent, data = batch
         # we send batches of 1 token size
         self.assertEqual(sent, itr)
-        # |COMMAND|ID|EXPIRY|TOKENLEN|TOKEN|PAYLOADLEN|PAYLOAD|
-        command, ID, expiry, tokenlen = struct.unpack(">BIIH", data[0:11])
-        token = data[11:(11 + tokenlen)].encode("hex")
-        payloadlen = struct.unpack(">H", data[(11 + tokenlen):(11 + tokenlen + 2)])[0]
-        payload = json.loads(data[(11 + tokenlen + 2): (11 + tokenlen + 2 + payloadlen)])
-        # test packaging
-        self.assertEqual(command, 1)
-        self.assertEqual(ID, itr)
-        # test message
-        self.assertEqual(msg.tokens[itr].lower(), token.lower())
-        self.assertEqual(msg.expiry, expiry)
-        self.assertEqual(msg.alert, payload['aps']['alert'])
-        self.assertEqual(msg.badge, payload['aps'].get('badge'))
-        self.assertEqual(msg.sound, payload['aps'].get('sound'))
-        payload.pop('aps')
-        self.assertEqual(msg.extra, payload)
+        # |COMMAND|FRAME-LEN|{token}|{payload}|{id:4}|{expiry:4}|{priority:1}
+        command, frame_len = struct.unpack(">BI", data[0:5])
+        self.assertEqual(command, 2)
+        self.assertEqual(frame_len, len(data) - 5)
+        
+        off = 5
+        restored = {}
+        for itm in xrange(1, 6):
+            hdr, length = struct.unpack(">BH", data[off:(off+3)])
+            off += 3
+            value = data[off:(off+length)]
+            off += length
+            if hdr == 1:
+                restored['token'] = value.encode('hex')
+            elif hdr == 2:
+                restored['payload'] = json.loads(value)
+            elif hdr == 3:
+                restored['index'] = struct.unpack(">I", value)[0]
+            elif hdr == 4:
+                restored['expiry'] = struct.unpack(">I", value)[0]
+            elif hdr == 5:
+                restored['priority'] = struct.unpack(">B", value)[0]
+
+        for key in ('token', 'payload', 'index', 'expiry', 'priority'):
+            if key not in restored:
+                self.fail("Binary message is missing: %s" % key)
+
+        # check message
+        self.assertEqual(msg.tokens[itr].lower(), restored['token'].lower())
+        self.assertEqual(msg.payload['aps'], restored['payload']['aps'])
+        restored['payload'].pop('aps')
+        self.assertEqual(msg.extra, restored['payload'])
+        self.assertEqual(restored['index'], itr)
+        self.assertEqual(msg.expiry, restored['expiry'])
+        self.assertEqual(msg.priority, restored['priority'])
 
     def test_retry(self):
         # include failed
         runi = self.uni.retry(0, True)
-        for key in ('tokens', 'alert', 'badge', 'sound', 'content_available', 'expiry', 'extra'):
+        for key in ('tokens', 'alert', 'badge', 'sound', 'content_available', 'expiry', 'priority', 'extra'):
             self.assertEqual(getattr(self.uni, key), getattr(runi, key))
 
         # nothing to retry, we skip the token
@@ -166,18 +185,18 @@ class APNsClientMessageTest(unittest.TestCase):
 
         # include failed
         rmulti = self.multi.retry(0, True)
-        for key in ('tokens', 'alert', 'badge', 'sound', 'content_available', 'expiry', 'extra'):
+        for key in ('tokens', 'alert', 'badge', 'sound', 'content_available', 'expiry', 'priority', 'extra'):
             self.assertEqual(getattr(self.multi, key), getattr(rmulti, key))
 
         # skip failed
         rmulti = self.multi.retry(0, False)
         self.assertEqual(self.multi.tokens[1:], rmulti.tokens)
-        for key in ('alert', 'badge', 'sound', 'content_available', 'expiry', 'extra'):
+        for key in ('alert', 'badge', 'sound', 'content_available', 'expiry', 'priority', 'extra'):
             self.assertEqual(getattr(self.multi, key), getattr(rmulti, key))
 
     def test_non_ascii(self):
-        # meta-data size
-        empty_msg_size = len(Message(tokens=[], alert="").get_json_payload())
+        # meta-data size. ensure 'alert' is included.
+        empty_msg_size = len(Message(tokens=[], alert="a").get_json_payload()) - 1
 
         MAX_UTF8_SIZE = 3  # size of maximum utf8 encoded character in bytes
         chinese_str = (
@@ -206,13 +225,14 @@ class APNsClientResultTest(unittest.TestCase):
     def test_result(self):
         for reason in Result.ERROR_CODES.keys():
             res = Result(self.msg, (reason, 0))
-            self.assertEqual(len(res.errors), int(reason in (1, 3, 4, 6, 7, None)))
+            self.assertEqual(len(res.errors), int(reason in (1, 3, 4, 6, 7, 10, None)))
             self.assertEqual(len(res.failed), int(reason in (2, 5, 8)))
-            self.assertEqual(reason in (1, 2, 5, 8, None), res.needs_retry())
+            self.assertEqual(reason in (1, 2, 5, 8, 10, None), res.needs_retry())
 
             if res.needs_retry():
                 ret = res.retry()
-                self.assertEqual(len(ret.tokens), 2 - len(res.failed))
+                # skip failed or successful token by Shutdown
+                self.assertEqual(len(ret.tokens), 2 - len(res.failed) - int(reason == 10))
 
 
 if __name__ == '__main__':
