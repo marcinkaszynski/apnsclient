@@ -712,17 +712,18 @@ class Message(object):
         'ensure_ascii': False,
     }
 
-    def __init__(self, tokens, alert=None, badge=None, sound=None, expiry=None, payload=None, **extra):
+    def __init__(self, tokens, alert=None, badge=None, sound=None, content_available=None, expiry=None, payload=None, **extra):
         """ The push notification to one or more device tokens.
 
             Read more `about payload
-            <http://developer.apple.com/library/mac/#documentation/NetworkingInternet/Conceptual/RemoteNotificationsPG/ApplePushService/ApplePushService.html#//apple_ref/doc/uid/TP40008194-CH100-SW9>`_.
+            <https://developer.apple.com/library/ios/documentation/NetworkingInternet/Conceptual/RemoteNotificationsPG/Chapters/ApplePushService.html#//apple_ref/doc/uid/TP40008194-CH100-SW1`_.
 
             :Arguments:
                 - `tokens` (str or list): set of device tokens where to message will be sent.
                 - `alert` (str or dict): the message; read APNs manual for recognized dict keys (localized messages).
                 - `badge` (int or str): badge number over the application icon or "
                 - `sound` (str): sound file to play on arrival.
+                - `content_available` (int): set to 1 to indicate new content is available.
                 - `expiry` (int or datetime or timedelta): timestamp when message will expire
                 - `payload` (dict): JSON-compatible dictionary with the
                                     complete message payload. If supplied, it
@@ -731,10 +732,10 @@ class Message(object):
                 - `extra` (kwargs): extra payload key-value pairs.
         """
         if (payload is not None and (
-                alert is not None or badge is not None or sound is not None or extra)):
+                alert is not None or badge is not None or sound is not None or content_available is not None or extra)):
             # Raise an error if both `payload` and the more specific
             # parameters are supplied.
-            raise ValueError("Payload specified together with alert/badge/sound/extra.")
+            raise ValueError("Payload specified together with alert/badge/sound/content_available/extra.")
 
         if isinstance(tokens, basestring):
             tokens = [tokens]
@@ -743,6 +744,7 @@ class Message(object):
         self.alert = alert
         self.badge = badge
         self.sound = sound
+        self.content_available = content_available
         self.extra = extra
         self._payload = payload
 
@@ -792,7 +794,7 @@ class Message(object):
                 'expiry': self.expiry,
             }
 
-        ret = dict((key, getattr(self, key)) for key in ('tokens', 'alert', 'badge', 'sound', 'expiry'))
+        ret = dict((key, getattr(self, key)) for key in ('tokens', 'alert', 'badge', 'sound', 'content_available', 'expiry'))
         if self.extra:
             ret.update(self.extra)
 
@@ -809,12 +811,13 @@ class Message(object):
             self.alert = None
             self.badge = None
             self.sound = None
+            self.content_available = None
         else:
             self._payload = None
             for key, val in state.iteritems():
                 if key in ('tokens', 'expiry'): # already set
                     pass
-                elif key in ('alert', 'badge', 'sound'):
+                elif key in ('alert', 'badge', 'sound', 'content_available'):
                     setattr(self, key, state[key])
                 else:
                     self.extra[key] = val
@@ -840,6 +843,9 @@ class Message(object):
 
         if self.sound is not None:
             aps['sound'] = str(self.sound)
+
+        if self.content_available is not None:
+            aps['content-available'] = self.content_available
 
         ret = {
             'aps': aps,
@@ -873,7 +879,7 @@ class Message(object):
             # nothing to retry
             return None
 
-        return Message(failed, self.alert, badge=self.badge, sound=self.sound, expiry=self.expiry, **self.extra)
+        return Message(failed, self.alert, badge=self.badge, sound=self.sound, content_available=self.content_available, expiry=self.expiry, **self.extra)
 
 
 class Batch(object):

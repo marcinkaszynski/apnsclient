@@ -48,7 +48,7 @@ class APNsTest(unittest.TestCase):
         # fail on invalid token on second message
         myssl.Connection().recv.return_value = struct.pack(">BBI", 8, 8, 1)
 
-        msg = Message(["0123456789ABCDEF", "FEDCBA9876543210"], alert="my alert", badge=10, my_extra=15)
+        msg = Message(["0123456789ABCDEF", "FEDCBA9876543210"], alert="my alert", badge=10, content_available=1, my_extra=15)
         self.push_con.close()
         srv = APNs(self.push_con)
         res = srv.send(msg)
@@ -79,8 +79,8 @@ class APNsClientMessageTest(unittest.TestCase):
     """ Test Message API. """
 
     def setUp(self):
-        self.uni = Message("0123456789ABCDEF", alert="alert", badge=10)
-        self.multi = Message(["0123456789ABCDEF", "FEDCBA9876543210"], alert="my alerrt", sound="cool.mp3", my_extra=15)
+        self.uni = Message("0123456789ABCDEF", alert="alert", badge=10, content_available=1)
+        self.multi = Message(["0123456789ABCDEF", "FEDCBA9876543210"], alert="my alerrt", sound="cool.mp3", content_available=1, my_extra=15)
         self.payload = Message(["0123456789ABCDEF", "FEDCBA9876543210"], payload=self.uni.payload)
 
     def test_serialization(self):
@@ -93,7 +93,7 @@ class APNsClientMessageTest(unittest.TestCase):
         cmulti = pickle.loads(smulti)
         cpayload = pickle.loads(spayload)
 
-        for key in ('tokens', 'alert', 'badge', 'sound', 'expiry', 'extra', '_payload'):
+        for key in ('tokens', 'alert', 'badge', 'sound', 'content_available', 'expiry', 'extra', '_payload'):
             self.assertEqual(getattr(self.uni, key), getattr(cuni, key))
             self.assertEqual(getattr(self.multi, key), getattr(cmulti, key))
             self.assertEqual(getattr(self.payload, key), getattr(cpayload, key))
@@ -115,7 +115,7 @@ class APNsClientMessageTest(unittest.TestCase):
         cmulti = Message(**smulti)
         cpayload = Message(**spayload)
 
-        for key in ('tokens', 'alert', 'badge', 'sound', 'expiry', 'extra', '_payload'):
+        for key in ('tokens', 'alert', 'badge', 'sound', 'content_available', 'expiry', 'extra', '_payload'):
             self.assertEqual(getattr(self.uni, key), getattr(cuni, key))
             self.assertEqual(getattr(self.multi, key), getattr(cmulti, key))
             self.assertEqual(getattr(self.payload, key), getattr(cpayload, key))
@@ -158,7 +158,7 @@ class APNsClientMessageTest(unittest.TestCase):
     def test_retry(self):
         # include failed
         runi = self.uni.retry(0, True)
-        for key in ('tokens', 'alert', 'badge', 'sound', 'expiry', 'extra'):
+        for key in ('tokens', 'alert', 'badge', 'sound', 'content_available', 'expiry', 'extra'):
             self.assertEqual(getattr(self.uni, key), getattr(runi, key))
 
         # nothing to retry, we skip the token
@@ -166,13 +166,13 @@ class APNsClientMessageTest(unittest.TestCase):
 
         # include failed
         rmulti = self.multi.retry(0, True)
-        for key in ('tokens', 'alert', 'badge', 'sound', 'expiry', 'extra'):
+        for key in ('tokens', 'alert', 'badge', 'sound', 'content_available', 'expiry', 'extra'):
             self.assertEqual(getattr(self.multi, key), getattr(rmulti, key))
 
         # skip failed
         rmulti = self.multi.retry(0, False)
         self.assertEqual(self.multi.tokens[1:], rmulti.tokens)
-        for key in ('alert', 'badge', 'sound', 'expiry', 'extra'):
+        for key in ('alert', 'badge', 'sound', 'content_available', 'expiry', 'extra'):
             self.assertEqual(getattr(self.multi, key), getattr(rmulti, key))
 
     def test_non_ascii(self):
