@@ -18,6 +18,10 @@ import datetime
 import select
 from struct import pack, unpack
 
+# python 3 support
+import six
+import binascii
+
 import OpenSSL
 
 try:
@@ -151,8 +155,8 @@ class Connection(object):
         self._certificate = certificate
         self._socket = None
         self._connection = None
-        self._readbuf = ""
-        self.__feedbackbuf = ""
+        self._readbuf = six.b("")
+        self.__feedbackbuf = six.b("")
         self._lock = _threading.Lock()
         self._last_refresh = None
 
@@ -218,8 +222,8 @@ class Connection(object):
 
             self._socket = None
             self._connection = None
-            self._readbuf = ""
-            self._feedbackbuf = ""
+            self._readbuf = six.b("")
+            self._feedbackbuf = six.b("")
 
     def is_closed(self):
         """ Returns True if this connection is closed.
@@ -267,8 +271,8 @@ class Connection(object):
     def refresh(self):
         """ Ensure socket is still alive. Reopen if needed. """
         self._ensure_socket_open()
-        self._readbuf = ""
-        self._feedbackbuf = ""
+        self._readbuf = six.b("")
+        self._feedbackbuf = six.b("")
         self._last_refresh = datetime.datetime.now()
 
     def send(self, chunk):
@@ -428,7 +432,7 @@ class Connection(object):
         while len(self._feedbackbuf) > 6:
             timestamp, length = unpack(">IH", self._feedbackbuf[0:6])
             if len(self._feedbackbuf) >= (6 + length):
-                token = self._feedbackbuf[6:(length + 6)].encode("hex").upper()
+                token = binascii.hexlify(self._feedbackbuf[6:(length + 6)]).upper()
                 self._feedbackbuf = self._feedbackbuf[(length + 6):]
                 yield (token, timestamp)
             else:
@@ -476,7 +480,7 @@ class Session(object):
                 - `certificate` (:class:`Certificate`): provider's certificate instance.
                 - `cert_params` (kwargs): :class:`Certificate` arguments, used if `certificate` instance is not given.
         """
-        if isinstance(address, basestring):
+        if isinstance(address, six.string_types):
             addr = cls.ADDRESSES.get(address)
             if addr is None:
                 raise ValueError("Unknown address mapping: {0}".format(address))
@@ -510,7 +514,7 @@ class Session(object):
                 - `certificate` (:class:`Certificate`): provider's certificate instance.
                 - `cert_params` (kwargs): :class:`Certificate` arguments, used if `certificate` instance is not given.
         """
-        if isinstance(address, basestring):
+        if isinstance(address, six.string_types):
             addr = self.ADDRESSES.get(address)
             if addr is None:
                 raise ValueError("Unknown address mapping: {0}".format(address))
@@ -738,7 +742,7 @@ class Message(object):
             # parameters are supplied.
             raise ValueError("Payload specified together with alert/badge/sound/content_available/extra.")
 
-        if isinstance(tokens, basestring):
+        if isinstance(tokens, six.string_types):
             tokens = [tokens]
 
         self._tokens = tokens
@@ -818,7 +822,7 @@ class Message(object):
             self.content_available = None
         else:
             self._payload = None
-            for key, val in state.iteritems():
+            for key, val in six.iteritems(state):
                 if key in ('tokens', 'expiry'): # already set
                     pass
                 elif key in ('alert', 'badge', 'sound', 'content_available', 'priority'):
@@ -865,7 +869,7 @@ class Message(object):
     def get_json_payload(self):
         """ Convert message to JSON payload, acceptable by APNs. Must return byte string. """
         ret = json.dumps(self.payload, **self.json_parameters)
-        if isinstance(ret, basestring):
+        if isinstance(ret, six.string_types):
             ret = ret.encode("utf-8")
 
         return ret
@@ -917,7 +921,7 @@ class Batch(object):
 
         # for all registration ids
         for idx, token in enumerate(self.tokens):
-            tok = token.decode("hex")
+            tok = binascii.unhexlify(token)
             # |COMMAND|FRAME-LEN|{token}|{payload}|{id:4}|{expiry:4}|{priority:1}
             frame_len = 3*5 + len(tok) + len(self.payload) + 4 + 4 + 1 # 5 items, each 3 bytes prefix, then each item length
             fmt = ">BIBH%ssBH%ssBHIBHIBHB" % (len(tok), len(self.payload))
@@ -931,7 +935,7 @@ class Batch(object):
             messages.append(message)
             buf += len(message)
             if buf >= self.packet_size:
-                chunk = "".join(messages)
+                chunk = six.b("").join(messages)
                 buf = 0
                 prev_sent = sent
                 sent += len(messages)
@@ -940,7 +944,7 @@ class Batch(object):
 
         # last small chunk
         if messages:
-            yield sent, "".join(messages)
+            yield sent, six.b("").join(messages)
 
 
 class Result(object):

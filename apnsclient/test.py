@@ -8,6 +8,10 @@ import datetime
 from mock import patch
 from OpenSSL.SSL import ZeroReturnError
 
+# python 3 support
+import six
+import binascii
+
 from apnsclient import *
 
 
@@ -54,7 +58,7 @@ class APNsTest(unittest.TestCase):
         res = srv.send(msg)
 
         self.assertEqual(len(res.failed), 1)
-        self.assertEqual(res.failed.keys()[0], "FEDCBA9876543210")
+        self.assertEqual(next(iter(res.failed.keys())), "FEDCBA9876543210")
         # it was the last token and we skip it
         self.assertFalse(res.needs_retry())
         self.assertTrue(self.push_con.is_closed())
@@ -64,7 +68,7 @@ class APNsTest(unittest.TestCase):
         myssl.ZeroReturnError = ZeroReturnError
 
         # fail on invalid token on second message
-        token = "0123456789ABCDEF".decode("hex")
+        token = binascii.unhexlify("0123456789ABCDEF")
         curtime = int(time.time())
         myssl.Connection().recv.side_effect = [struct.pack(">IH%ss" % len(token), curtime, len(token), token), ZeroReturnError()]
 
@@ -72,7 +76,7 @@ class APNsTest(unittest.TestCase):
         srv = APNs(self.feed_con)
         feed = list(srv.feedback())
         self.assertEqual(len(feed), 1)
-        self.assertEqual(feed[0], ('0123456789ABCDEF', datetime.datetime.fromtimestamp(curtime)))
+        self.assertEqual(feed[0], (six.b('0123456789ABCDEF'), datetime.datetime.fromtimestamp(curtime)))
 
 
 class APNsClientMessageTest(unittest.TestCase):
@@ -107,9 +111,14 @@ class APNsClientMessageTest(unittest.TestCase):
         smulti = json.dumps(smulti)
         spayload = json.dumps(spayload)
 
-        suni = dict((k.encode("UTF-8"), v) for k, v in json.loads(suni).iteritems())
-        smulti = dict((k.encode("UTF-8"), v) for k, v in json.loads(smulti).iteritems())
-        spayload = dict((k.encode("UTF-8"), v) for k, v in json.loads(spayload).iteritems())
+        suni = json.loads(suni)
+        smulti = json.loads(smulti)
+        spayload = json.loads(spayload)
+
+        if six.PY2:
+            suni = dict((k.encode("UTF-8"), v) for k, v in six.iteritems(suni))
+            smulti = dict((k.encode("UTF-8"), v) for k, v in six.iteritems(smulti))
+            spayload = dict((k.encode("UTF-8"), v) for k, v in six.iteritems(spayload))
 
         cuni = Message(**suni)
         cmulti = Message(**smulti)
@@ -145,15 +154,15 @@ class APNsClientMessageTest(unittest.TestCase):
         
         off = 5
         restored = {}
-        for itm in xrange(1, 6):
+        for itm in range(1, 6):
             hdr, length = struct.unpack(">BH", data[off:(off+3)])
             off += 3
             value = data[off:(off+length)]
             off += length
             if hdr == 1:
-                restored['token'] = value.encode('hex')
+                restored['token'] = binascii.hexlify(value).decode('ascii')
             elif hdr == 2:
-                restored['payload'] = json.loads(value)
+                restored['payload'] = json.loads(value.decode('utf-8'))
             elif hdr == 3:
                 restored['index'] = struct.unpack(">I", value)[0]
             elif hdr == 4:
