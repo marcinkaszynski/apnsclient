@@ -1,147 +1,189 @@
+# Copyright 2014 Sardar Yumatov
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 if __name__ == '__main__':
     import os.path, sys
     sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
-import unittest, struct, pickle, json
-import time
-import datetime
-from mock import patch
-from OpenSSL.SSL import ZeroReturnError
+import unittest, struct, pickle, json, datetime
 
 # python 3 support
 import six
 import binascii
 
-from apnsclient import *
+from apnsclient import Message, Session, APNs
+from apnsclient.certificate import Certificate
+from apnsclient.apns import Result
+from apnsclient.backends.dummy import Backend as DummyBackend
 
 
+CERTIFICATE = b"""-----BEGIN CERTIFICATE-----
+MIIDPTCCAuegAwIBAgIJALpcHuGZGDLzMA0GCSqGSIb3DQEBBQUAMIGdMQswCQYD
+VQQGEwJOTDESMBAGA1UECBMJR3JvbmluZ2VuMRIwEAYDVQQHEwlHcm9uaW5nZW4x
+FDASBgNVBAoTC2FwbnMtY2xpZW50MRUwEwYDVQQLEwxjZXJ0aWZpY2F0ZXMxFzAV
+BgNVBAMTDlNhcmRhciBZdW1hdG92MSAwHgYJKoZIhvcNAQkBFhFqYS5kb21hQGdt
+YWlsLmNvbTAeFw0xNDA1MjUxMjEwMjNaFw0xNDA2MjQxMjEwMjNaMIGdMQswCQYD
+VQQGEwJOTDESMBAGA1UECBMJR3JvbmluZ2VuMRIwEAYDVQQHEwlHcm9uaW5nZW4x
+FDASBgNVBAoTC2FwbnMtY2xpZW50MRUwEwYDVQQLEwxjZXJ0aWZpY2F0ZXMxFzAV
+BgNVBAMTDlNhcmRhciBZdW1hdG92MSAwHgYJKoZIhvcNAQkBFhFqYS5kb21hQGdt
+YWlsLmNvbTBcMA0GCSqGSIb3DQEBAQUAA0sAMEgCQQC8hz/oFmBrSXpVwipPxFxZ
+qzSGgojSVxM/Mzaf24l/b9oeszfnrq0owk40PG7InSv6l5Z71SXKIOLKwJBgI8Od
+AgMBAAGjggEGMIIBAjAdBgNVHQ4EFgQUW0eeuZwjTcf1irE+11/C8fF2tSowgdIG
+A1UdIwSByjCBx4AUW0eeuZwjTcf1irE+11/C8fF2tSqhgaOkgaAwgZ0xCzAJBgNV
+BAYTAk5MMRIwEAYDVQQIEwlHcm9uaW5nZW4xEjAQBgNVBAcTCUdyb25pbmdlbjEU
+MBIGA1UEChMLYXBucy1jbGllbnQxFTATBgNVBAsTDGNlcnRpZmljYXRlczEXMBUG
+A1UEAxMOU2FyZGFyIFl1bWF0b3YxIDAeBgkqhkiG9w0BCQEWEWphLmRvbWFAZ21h
+aWwuY29tggkAulwe4ZkYMvMwDAYDVR0TBAUwAwEB/zANBgkqhkiG9w0BAQUFAANB
+AGwgOsUkTIo1y9v3Y77r02RjJLQRL1P68J8Exiunc53LR97Cg+o7LmaHonaLTUUH
+jahmYuZGN/Mty0brOn9hTI0=
+-----END CERTIFICATE-----"""
 
-class APNsTest(unittest.TestCase):
-    """ Test APNs client. """
+PRIVATE_KEY = b"""-----BEGIN RSA PRIVATE KEY-----
+Proc-Type: 4,ENCRYPTED
+DEK-Info: DES-EDE3-CBC,3195B956C3AD71F6
 
-    @patch('OpenSSL.SSL')
-    @patch('OpenSSL.crypto')
-    def setUp(self, mycrypto, myssl):
-        myssl.crypto.dump_certificate.return_value = 'certificate'
+g7mfzdit5/26briSho71co+eqHV4Xxw7Y/lJzjuN7SGFjUbh/mBNjOxNmXzVSBWo
+50SH/NgyqW7wy4glVLIdZ7u7iR8JZjXeBmH1Aee7+4TLGT5fTDR5aYWW7EPIRJ+E
+fAgEm1A0fsiHf7ki++UAFtZTPVcQg1NGeYjkJmpgn4CQwyztcfq1psIvNBBgAdrG
+UkHeJvwMalS/cmnVVdH2jR2liCsJhfH4lqH8eUSfGwCBeEjAY0Lg6HPwZY+eiVay
+/F5D8oL8GvqrM4hyzxU0KOZ8Pu0VUe1wDXDiNv3TUypZm5Y5sRi9DZ6jwZa7/hiE
+h3nbwhSfx2WC3bN8Gs8G9pJV9LGiBY2y2zANYTrq7Mv3iVLkHY8BQIUYQuiUnT20
+8jeLSXRfZauDrVW5a8wGSJJLAyHGbXMAMV81z129xf8=
+-----END RSA PRIVATE KEY-----"""
 
-        self.session = Session()
-        self.push_con = self.session.get_connection("push_production", cert_string='certificate_content')
-        self.same_push_con = self.session.get_connection("push_production", cert_string='certificate content')
+PRIVATE_PASS= "test"
 
-        self.feed_con = Session.new_connection("feedback_production", cert_string='certificate_content')
-        self.same_feed_con = Session.new_connection("feedback_production", cert_string='certificate_content')
 
-    @patch('OpenSSL.SSL')
-    def test_session(self, myssl):
-        self.assertEqual(self.push_con, self.same_push_con)
-        self.assertNotEqual(self.feed_con, self.same_feed_con)
+class CertificateTest(unittest.TestCase):
+    """ Test certificate loading. """
+
+    def test_loading(self):
+        cert = Certificate(
+                cert_string=CERTIFICATE,
+                key_string=PRIVATE_KEY,
+                passphrase=PRIVATE_PASS
+            )
+
+        cert2 = Certificate(
+                cert_string=(CERTIFICATE + b"\n" + PRIVATE_KEY),
+                passphrase=PRIVATE_PASS
+            )
+
+        self.assertIsNotNone(cert.get_context())
+        self.assertEqual(cert, cert2)
         
-        self.assertTrue(self.push_con.is_closed())
-        self.push_con.refresh()
-        self.assertFalse(self.push_con.is_closed())
-
-        # can not outdate if few moments
-        self.assertEqual(self.session.outdate(datetime.timedelta(minutes=5)), 0)
-        self.assertFalse(self.push_con.is_closed())
-
-        self.session.shutdown()
-        self.assertTrue(self.push_con.is_closed())
-
-    @patch('OpenSSL.SSL')
-    def test_send(self, myssl):
-        # fail on invalid token on second message
-        myssl.Connection().recv.return_value = struct.pack(">BBI", 8, 8, 1)
-
-        msg = Message(["0123456789ABCDEF", "FEDCBA9876543210"], alert="my alert", badge=10, content_available=1, my_extra=15)
-        self.push_con.close()
-        srv = APNs(self.push_con)
-        res = srv.send(msg)
-
-        self.assertEqual(len(res.failed), 1)
-        self.assertEqual(next(iter(res.failed.keys())), "FEDCBA9876543210")
-        # it was the last token and we skip it
-        self.assertFalse(res.needs_retry())
-        self.assertTrue(self.push_con.is_closed())
-
-    @patch('OpenSSL.SSL')
-    def test_feedback(self, myssl):
-        myssl.ZeroReturnError = ZeroReturnError
-
-        # fail on invalid token on second message
-        token = binascii.unhexlify("0123456789ABCDEF")
-        curtime = int(time.time())
-        myssl.Connection().recv.side_effect = [struct.pack(">IH%ss" % len(token), curtime, len(token), token), ZeroReturnError()]
-
-        self.feed_con.close()
-        srv = APNs(self.feed_con)
-        feed = list(srv.feedback())
-        self.assertEqual(len(feed), 1)
-        self.assertEqual(feed[0], (six.b('0123456789ABCDEF'), datetime.datetime.fromtimestamp(curtime)))
-
 
 class APNsClientMessageTest(unittest.TestCase):
     """ Test Message API. """
 
     def setUp(self):
-        self.uni = Message("0123456789ABCDEF", alert="alert", badge=10, content_available=1)
-        self.multi = Message(["0123456789ABCDEF", "FEDCBA9876543210"], alert="my alerrt", sound="cool.mp3", content_available=1, my_extra=15)
-        self.payload = Message(["0123456789ABCDEF", "FEDCBA9876543210"], payload=self.uni.payload, priority=5)
+        self.now = datetime.datetime.now()
+        # Typical message
+        self.message = Message(
+            "0123456789ABCDEF",
+            alert=u"Russian: \u0421\u0430\u0440\u0434\u0430\u0440",
+            badge=10,
+            sound="test.mp3",
+            content_available=1,
+            expiry=self.now + datetime.timedelta(days=3),
+            priority=30,
+            extra={'key': 'value'}
+        )
+        # Message with a custom payload
+        self.raw_message = Message(
+            ["0123456789ABCDEF", "FEDCBA9876543210"],
+            payload=self.message.payload,
+            priority=5,
+            expiry=datetime.timedelta(days=5)
+        )
+
+    def test_payload(self):
+        payload = self.message.get_json_payload()
+        self.assertIsInstance(payload, six.binary_type)
+        unicode_src = payload.decode('utf-8')
+        payload = json.loads(unicode_src)
+        self.assertEqual(payload["aps"], {
+            "alert": self.message.alert,
+            "badge": self.message.badge,
+            "sound": self.message.sound,
+            "content-available": self.message.content_available
+        })
+        for k, v in self.message.extra.items():
+            self.assertEqual(payload[k], v)
 
     def test_serialization(self):
         # standard pickle
-        suni = pickle.dumps(self.uni)
-        smulti = pickle.dumps(self.multi)
-        spayload = pickle.dumps(self.payload)
-        
-        cuni = pickle.loads(suni)
-        cmulti = pickle.loads(smulti)
-        cpayload = pickle.loads(spayload)
+        s_message = pickle.dumps(self.message)
+        s_raw_message = pickle.dumps(self.raw_message)
+        c_message = pickle.loads(s_message)
+        c_raw_message = pickle.loads(s_raw_message)
 
         for key in ('tokens', 'alert', 'badge', 'sound', 'content_available', 'expiry', 'extra', 'priority', '_payload'):
-            self.assertEqual(getattr(self.uni, key), getattr(cuni, key))
-            self.assertEqual(getattr(self.multi, key), getattr(cmulti, key))
-            self.assertEqual(getattr(self.payload, key), getattr(cpayload, key))
+            self.assertEqual(getattr(self.message, key), getattr(c_message, key))
+            self.assertEqual(getattr(self.raw_message, key), getattr(c_raw_message, key))
 
         # custom
-        suni = self.uni.__getstate__()
-        smulti = self.multi.__getstate__()
-        spayload = self.payload.__getstate__()
+        s_message = self.message.__getstate__()
+        s_raw_message = self.raw_message.__getstate__()
         # JSON/XML/etc and store/send
-        suni = json.dumps(suni)
-        smulti = json.dumps(smulti)
-        spayload = json.dumps(spayload)
-
-        suni = json.loads(suni)
-        smulti = json.loads(smulti)
-        spayload = json.loads(spayload)
-
-        if six.PY2:
-            suni = dict((k.encode("UTF-8"), v) for k, v in six.iteritems(suni))
-            smulti = dict((k.encode("UTF-8"), v) for k, v in six.iteritems(smulti))
-            spayload = dict((k.encode("UTF-8"), v) for k, v in six.iteritems(spayload))
-
-        cuni = Message(**suni)
-        cmulti = Message(**smulti)
-        cpayload = Message(**spayload)
+        s_message = json.dumps(s_message)
+        s_raw_message = json.dumps(s_raw_message)
+        # unserialize
+        s_message = json.loads(s_message)
+        s_raw_message = json.loads(s_raw_message)
+        # reconstruct
+        c_message = Message(**s_message)
+        c_raw_message = Message(**s_raw_message)
 
         for key in ('tokens', 'alert', 'badge', 'sound', 'content_available', 'expiry', 'extra', 'priority', '_payload'):
-            self.assertEqual(getattr(self.uni, key), getattr(cuni, key))
-            self.assertEqual(getattr(self.multi, key), getattr(cmulti, key))
-            self.assertEqual(getattr(self.payload, key), getattr(cpayload, key))
+            self.assertEqual(getattr(self.message, key), getattr(c_message, key))
+            self.assertEqual(getattr(self.raw_message, key), getattr(c_raw_message, key))
+
+    def test_non_ascii(self):
+        # meta-data size. ensure 'alert' is included.
+        empty_msg_size = len(Message(tokens=[], alert="a").get_json_payload()) - 1
+
+        MAX_UTF8_SIZE = 3  # size of maximum utf8 encoded character in bytes
+        chinese_str = (
+            u'\u5187\u869a\u5487\u6b8f\u5cca\u9f46\u9248\u6935\u4ef1\u752a'
+            u'\u67cc\u521e\u62b0\u530a\u6748\u9692\u5c6e\u653d\u588f\u6678')
+        chinese_msg_size = len(Message(tokens=[], alert=chinese_str).get_json_payload())
+        self.assertLessEqual(
+            chinese_msg_size,
+            empty_msg_size + len(chinese_str) * MAX_UTF8_SIZE)
+
+        MAX_EMOJI_SIZE = 4  # size of maximum utf8 encoded character in bytes
+        # emoji
+        emoji_str = (u'\U0001f601\U0001f603\U0001f638\U00002744')
+        emoji_msg_size = len(Message(tokens="", alert=emoji_str).get_json_payload())
+        self.assertLessEqual(
+            emoji_msg_size,
+            empty_msg_size + len(emoji_str) * MAX_EMOJI_SIZE)
 
     def test_batch(self):
         # binary serialization in ridiculously small buffer =)
-        buni = list(self.uni.batch(10))
-        bmulti = list(self.multi.batch(10))
+        b_message = list(self.message.batch(10))
+        b_raw_message = list(self.raw_message.batch(10))
 
         # number of batches
-        self.assertEqual(len(buni), 1)
-        self.assertEqual(len(bmulti), 2)
+        self.assertEqual(len(b_message), 1)
+        self.assertEqual(len(b_raw_message), 2)
 
         # lets read stuff back. number of sent before ID's is of course 0.
-        self.check_message(buni[0], 0, self.uni)
-        self.check_message(bmulti[0], 0, self.multi)
-        self.check_message(bmulti[1], 1, self.multi)
+        self.check_message(b_message[0], 0, self.message)
+        self.check_message(b_raw_message[0], 0, self.raw_message)
+        self.check_message(b_raw_message[1], 1, self.raw_message)
 
     def check_message(self, batch, itr, msg):
         sent, data = batch
@@ -185,56 +227,35 @@ class APNsClientMessageTest(unittest.TestCase):
 
     def test_retry(self):
         # include failed
-        runi = self.uni.retry(0, True)
+        r_message = self.message.retry(0, True)
         for key in ('tokens', 'alert', 'badge', 'sound', 'content_available', 'expiry', 'priority', 'extra'):
-            self.assertEqual(getattr(self.uni, key), getattr(runi, key))
+            self.assertEqual(getattr(self.message, key), getattr(r_message, key))
 
         # nothing to retry, we skip the token
-        self.assertEqual(self.uni.retry(0, False), None)
+        self.assertEqual(self.message.retry(0, False), None)
 
         # include failed
-        rmulti = self.multi.retry(0, True)
+        r_raw_message = self.raw_message.retry(0, True)
         for key in ('tokens', 'alert', 'badge', 'sound', 'content_available', 'expiry', 'priority', 'extra'):
-            self.assertEqual(getattr(self.multi, key), getattr(rmulti, key))
+            self.assertEqual(getattr(self.raw_message, key), getattr(r_raw_message, key))
 
         # skip failed
-        rmulti = self.multi.retry(0, False)
-        self.assertEqual(self.multi.tokens[1:], rmulti.tokens)
+        r_raw_message = self.raw_message.retry(0, False)
+        self.assertEqual(self.raw_message.tokens[1:], r_raw_message.tokens)
         for key in ('alert', 'badge', 'sound', 'content_available', 'expiry', 'priority', 'extra'):
-            self.assertEqual(getattr(self.multi, key), getattr(rmulti, key))
-
-    def test_non_ascii(self):
-        # meta-data size. ensure 'alert' is included.
-        empty_msg_size = len(Message(tokens=[], alert="a").get_json_payload()) - 1
-
-        MAX_UTF8_SIZE = 3  # size of maximum utf8 encoded character in bytes
-        chinese_str = (
-            u'\u5187\u869a\u5487\u6b8f\u5cca\u9f46\u9248\u6935\u4ef1\u752a'
-            u'\u67cc\u521e\u62b0\u530a\u6748\u9692\u5c6e\u653d\u588f\u6678')
-        chinese_msg_size = len(Message(tokens=[], alert=chinese_str).get_json_payload())
-        self.assertLessEqual(
-            chinese_msg_size,
-            empty_msg_size + len(chinese_str) * MAX_UTF8_SIZE)
-
-        MAX_EMOJI_SIZE = 4  # size of maximum utf8 encoded character in bytes
-        # emoji
-        emoji_str = (u'\U0001f601\U0001f603\U0001f638\U00002744')
-        emoji_msg_size = len(Message(tokens="", alert=emoji_str).get_json_payload())
-        self.assertLessEqual(
-            emoji_msg_size,
-            empty_msg_size + len(emoji_str) * MAX_EMOJI_SIZE)
+            self.assertEqual(getattr(self.raw_message, key), getattr(r_raw_message, key))
 
 
 class APNsClientResultTest(unittest.TestCase):
     """ Test Result API. """
 
     def setUp(self):
-        self.msg = Message(["0123456789ABCDEF", "FEDCBA9876543210"], alert="my alerrt", sound="cool.mp3", my_extra=15)
+        self.msg = Message(["0123456789ABCDEF", "FEDCBA9876543210"], alert="message")
 
     def test_result(self):
         for reason in Result.ERROR_CODES.keys():
             res = Result(self.msg, (reason, 0))
-            self.assertEqual(len(res.errors), int(reason in (1, 3, 4, 6, 7, 10, None)))
+            self.assertEqual(len(res.errors), int(reason in (1, 3, 4, 6, 7, None)))
             self.assertEqual(len(res.failed), int(reason in (2, 5, 8)))
             self.assertEqual(reason in (1, 2, 5, 8, 10, None), res.needs_retry())
 
@@ -242,6 +263,65 @@ class APNsClientResultTest(unittest.TestCase):
                 ret = res.retry()
                 # skip failed or successful token by Shutdown
                 self.assertEqual(len(ret.tokens), 2 - len(res.failed) - int(reason == 10))
+
+
+class APNsTest(unittest.TestCase):
+    """ Test APNs client. """
+
+    def setUp(self):
+        self.certificate = Certificate(
+                cert_string=CERTIFICATE,
+                key_string=PRIVATE_KEY,
+                passphrase=PRIVATE_PASS
+            )
+
+    #def test_default_pool_load(self):
+    #    session = Session()
+    #    self.assertIsNotNone(session.pool)
+    #    # we are not allowed to do any IO in tests, so no real connections.
+    #    # however, it is good idea to test utility functions even with empty pool.
+    #    session.outdate(datetime.timedelta(seconds=60))
+    #    session.shutdown()
+
+    def test_send(self):
+        # success, retry + include-failed, don't-retry + include-failed
+        backend = DummyBackend(push=(None, 1, 3))
+        session = Session(pool=backend)
+
+        msg = Message(["0123456789ABCDEF", "FEDCBA9876543210"], alert="my alert", badge=10, content_available=1, my_extra=15)
+        push_con = session.get_connection("push_production", certificate=self.certificate)
+        srv = APNs(push_con)
+        res = srv.send(msg)
+        self.assertEqual(len(res.failed), 0)
+        self.assertEqual(len(res.errors), 0)
+        self.assertFalse(res.needs_retry())
+
+        push_con2 = session.get_connection("push_production", certificate=self.certificate)
+        srv = APNs(push_con2)
+        res = srv.send(msg)
+        self.assertEqual(len(res.failed), 0)
+        self.assertEqual(len(res.errors), 1)
+        self.assertTrue(res.needs_retry())
+
+        # indeed, we have used the cache
+        self.assertEqual(session.pool.new_connections, 1)
+
+        push_con = session.new_connection("push_production", certificate=self.certificate)
+        srv = APNs(push_con)
+        res = srv.send(msg)
+        self.assertEqual(len(res.failed), 0)
+        self.assertEqual(len(res.errors), 1)
+        self.assertFalse(res.needs_retry())
+
+        # indeed, new connection, we haven't used the cache
+        self.assertEqual(session.pool.new_connections, 2)
+
+    def test_feedback(self):
+        backend = DummyBackend(feedback=5)
+        session = Session(pool=backend)
+        feed_con = session.new_connection("feedback_production", certificate=self.certificate)
+        srv = APNs(feed_con)
+        self.assertEqual(len(list(srv.feedback())), 5)
 
 
 if __name__ == '__main__':

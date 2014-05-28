@@ -1,4 +1,4 @@
-# Copyright 2013 Getlogic BV, Sardar Yumatov
+# Copyright 2014 Sardar Yumatov
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,603 +12,33 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import time
-import socket
 import datetime
-import select
-from struct import pack, unpack
+import logging
+from struct import pack
 
 # python 3 support
 import six
 import binascii
 
-import OpenSSL
 
-try:
-    import json
-except ImportError:
-    # try some wrapper
-    import omnijson as json
+__all__ = ('APNs', 'Message', 'Result')
 
-try:
-    import threading as _threading
-except ImportError:
-    import dummy_threading as _threading
-
-
-__all__ = ('Certificate', 'Connection', 'Session', 'APNs', 'Message', 'Result')
-
-
-class Certificate(object):
-    """ Certificate with private key. """
-
-    def __init__(self, cert_string=None, cert_file=None, key_string=None, key_file=None, passphrase=None):
-        """ Provider's certificate and private key.
-        
-            Your certificate will probably contain the private key. Open it
-            with any text editor, it should be plain text (PEM format). The
-            certificate is enclosed in ``BEGIN/END CERTIFICATE`` strings and
-            private key is in ``BEGIN/END RSA PRIVATE KEY`` section. If you can
-            not find the private key in your .pem file, then you should
-            provide it with `key_string` or `key_file` argument.
-
-            .. note::
-                If your private key is secured by a passphrase, then `pyOpenSSL`
-                will query it from `stdin`. If your application is not running in
-                the interactive mode, then don't protect your private key with a
-                passphrase or use `passphrase` argument. The latter option is
-                probably a big mistake since you expose the passphrase in your
-                source code.
-
-            :Arguments:
-                - `cert_string` (str): certificate in PEM format from string.
-                - `cert_file` (str): certificate in PEM format from file.
-                - `key_string` (str): private key in PEM format from string.
-                - `key_file` (str): private key in PEM format from file.
-                - `passphrase` (str): passphrase for your private key.
-        """
-        self._context = OpenSSL.SSL.Context(OpenSSL.SSL.SSLv3_METHOD)
-        
-        if cert_file:
-            # we have to load certificate for equality check. there is no
-            # other way to obtain certificate from context.
-            with open(cert_file, 'rb') as fp:
-                cert_string = fp.read()
-
-        cert = OpenSSL.crypto.load_certificate(OpenSSL.crypto.FILETYPE_PEM, cert_string)
-        self._context.use_certificate(cert)
-
-        if not key_string and not key_file:
-            # OpenSSL is smart enought to locate private key in certificate
-            args = [OpenSSL.crypto.FILETYPE_PEM, cert_string]
-            if passphrase is not None:
-                args.append(passphrase)
-
-            pk = OpenSSL.crypto.load_privatekey(*args)
-            self._context.use_privatekey(pk)
-        elif key_file and not passphrase:
-            self._context.use_privatekey_file(key_file, OpenSSL.crypto.FILETYPE_PEM)
-                    
-        else:
-            if key_file:
-                # key file is provided with passphrase. context.use_privatekey_file
-                # does not use passphrase, so we have to load the key file manually.
-                with open(key_file, 'rb') as fp:
-                    key_string = fp.read()
-
-            args = [OpenSSL.crypto.FILETYPE_PEM, key_string]
-            if passphrase is not None:
-                args.append(passphrase)
-
-            pk = OpenSSL.crypto.load_privatekey(*args)
-            self._context.use_privatekey(pk)
-
-        # check if we are not passed some garbage
-        self._context.check_privatekey()
-
-        # used to compare certificates.
-        self._equality = OpenSSL.crypto.dump_certificate(OpenSSL.crypto.FILETYPE_PEM, cert)
-
-    def get_context(self):
-        """ Returns SSL context instance.
-
-            You may use that context to specify required verification level,
-            trusted CA's etc.
-        """
-        return self._context
-
-    def __hash__(self):
-        return hash(self._equality)
-
-    def __eq__(self, other):
-        if isinstance(other, Certificate):
-            return self._equality == other._equality
-
-        return False
-
-
-class Connection(object):
-    """ Connection to APNs. """
-    # How much of timeout to wait extra if we have some bytes from APNs, but
-    # not enough for complete response. Trade-off between realtimeness and
-    # not loosing response from APNs over slow network.
-    extra_wait_factor = 0.5
-
-    def __init__(self, address, certificate):
-        """ Connection to APNs.
-
-            If your application is multi-threaded, then you have to lock this
-            connection before changing anything. Simply use the connection as
-            context manager in ``with`` statement. 
-
-            .. note::
-                You don't have to deal with locking at all if you just use
-                :class:`APNs` methods. The connection is a low-level object,
-                you may use it directly if you plan to configure it to your
-                needs (eg. SSL verification) or manually manage its state.
-
-            :Arguments:
-                - `address` (tuple): address as (host, port) tuple.
-                - `certificate` (:class:`Certificate`): provider's certificate.
-        """
-        self._address = address
-        self._certificate = certificate
-        self._socket = None
-        self._connection = None
-        self._readbuf = six.b("")
-        self.__feedbackbuf = six.b("")
-        self._lock = _threading.Lock()
-        self._last_refresh = None
-
-    @property
-    def address(self):
-        """ Target address. """
-        return self._address
-
-    @property
-    def certificate(self):
-        """ Provider's certificate. """
-        return self._certificate
-
-    def is_outdated(self, delta):
-        """ Returns True if this connection has not been refreshed in last delta time. """
-        if self._last_refresh:
-            return (datetime.datetime.now() - self._last_refresh) > delta
-
-        return False
-
-    def try_acquire(self):
-        """ Try to lock this connection. Returns True on success, False otherwise. """
-        return self._lock.acquire(False)
-
-    def acquire(self):
-        """ Lock this connection. """
-        self._lock.acquire(True)
-
-    def release(self):
-        """ Unlock this connection. """
-        self._lock.release()
-
-    def __enter__(self):
-        self.acquire()
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        self.release()
-
-    def __del__(self):
-        self.close()
-
-    def close(self):
-        """ Close this connection. """
-        if self._socket is not None:
-            if self._connection is not None:
-                try:
-                    # tell SSL socket we are done
-                    self._connection.shutdown()
-                except:
-                    pass
-
-                try:
-                    # free SSL related resources
-                    self._connection.close()
-                except:
-                    pass
-
-            try:
-                # just to be sure. maybe we shall also call self._cocket.shutdown()
-                self._socket.close()
-            except:
-                pass
-
-            self._socket = None
-            self._connection = None
-            self._readbuf = six.b("")
-            self._feedbackbuf = six.b("")
-
-    def is_closed(self):
-        """ Returns True if this connection is closed.
-
-            .. note:
-                If other end closes connection by itself, then this connection will
-                report open until next IO operation.
-        """
-        return self._socket is None
-
-    def _create_socket(self):
-        """ Create new plain TCP socket. Hook that you may override. """
-        return socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-
-    def configure_socket(self):
-        """ Hook to configure socket parameters. """
-        pass
-
-    def _create_openssl_connection(self):
-        """ Create new OpenSSL connection. Hook that you may override. """
-        return OpenSSL.SSL.Connection(self._certificate.get_context(), self._socket)
-
-    def configure_connection(self):
-        """ Hookt to configure SSL connection. """
-        pass
-
-    def _connect_and_handshake(self):
-        """ Connect to APNs and SSL handshake. Hook that you may override. """
-        self._connection.connect(self._address)
-        self._connection.do_handshake()
-
-    def _ensure_socket_open(self):
-        """ Refreshes socket. Hook that you may override. """
-        if self._socket is None:
-            try:
-                self._socket = self._create_socket()
-                self.configure_socket()
-                self._connection = self._create_openssl_connection()
-                self.configure_connection()
-                self._connect_and_handshake()
-            except Exception:
-                self.close()
-                raise
-
-    def refresh(self):
-        """ Ensure socket is still alive. Reopen if needed. """
-        self._ensure_socket_open()
-        self._readbuf = six.b("")
-        self._feedbackbuf = six.b("")
-        self._last_refresh = datetime.datetime.now()
-
-    def send(self, chunk):
-        """ Blocking write to SSL connection.
-
-            :Returns:
-                True if chunk is fully sent, False on failure
-        """
-        if self.is_closed():
-            return False
-
-        # blocking mode, never throw WantWriteError
-        self._connection.setblocking(1)
-        try:
-            self._connection.sendall(chunk)
-            return True
-        except OpenSSL.SSL.Error:
-            # underlying connection has been closed or failed
-            self.close()
-            return False
-
-    def peek(self):
-        """ Non blocking read for APNs result. """
-        if self.is_closed():
-            return None
-
-        ret = self.recv(256, 0)
-        if not ret:
-            # closed or nothing to read without blocking
-            return None
-
-        self._feed(ret)
-        return self._response()
-
-    def pull(self, timeout):
-        """ Blocking read for APNs result in at most timeout. """
-        if self.is_closed():
-            return None
-
-        waited = 0
-        towait = timeout
-        while True:
-            before = time.time()
-            ret = self.recv(256, towait)
-            if not ret:
-                # closed or timed out. possibly with some previously read, but
-                # incomplete response in the buffer. we assume APNs doesn't want to
-                # say anything back. This is a *really bad* protocol Apple, you suck.
-                return None
-
-            waited += time.time() - before
-            self._feed(ret)
-            ret = self._response()
-            if ret:
-                # we got response, end quickly. This usually means nothing good
-                # for you, developer =)
-                return ret
-
-            # OK, we got some bytes, but it is not enough for response. should
-            # never happens since we expect to get at most 6 bytes back.
-            if waited >= timeout:
-                # there is something in read buffer, but we run out of time.
-                # that response is much more important than real-timeness, so
-                # lets wait a little more.
-                towait = timeout * self.extra_wait_factor
-                if towait == 0:
-                    # looks like subclass has disabled extra_wait_factor
-                    return None
-            else:
-                towait = timeout - waited
-
-    def feedback(self, buffsize, timeout):
-        """ Read and parse feedback information. """
-        if self.is_closed():
-            return None
-
-        data = self.recv(buffsize, timeout)
-        if data is not None:
-            self._feed_feedback(data)
-            return self._read_feedback()
-
-        # timeout or connection closed
-        return None
-
-    def recv(self, buffsize, timeout=None):
-        """ Read bytes from connection.
-
-            Unlike standard socket, this method returns None if other end has
-            closed the connection or no data has been received within timeout.
-        """
-        if self.is_closed():
-            return None
-
-        if timeout is not None:
-            self._connection.setblocking(0)
-        else:
-            self._connection.setblocking(1)
-
-        waited = 0
-        while True:
-            try:
-                ret = self._connection.recv(buffsize)
-                if ret or timeout is None:
-                    if not ret:
-                        # empty result on blocking read means socket is dead.
-                        # should not happen, pyOpenSSL raises WantReadError instead.
-                        # but just in case we handle it.
-                        self.close()
-
-                    return ret or None
-            except OpenSSL.SSL.ZeroReturnError:
-                # SSL protocol alerted close. We have a nice shutdown here.
-                self.close()
-                return None
-            except OpenSSL.SSL.WantReadError:
-                # blocking mode and there is not enough bytes read means socket
-                # is abruptly closed (other end crashed)
-                if timeout is None:
-                    self.close()
-                    return None
-
-            if timeout == 0 or waited >= timeout:
-                # no time left
-                return None
-
-            # so, we perform blocking read and there was not enough bytes.
-            # note: errors is for out-of-band and other shit. not what you may
-            # think an IO erro would be ;-)
-            before = time.time()
-            canread, _, _ = select.select((self._socket, ), (), (), timeout - waited)
-            if not canread:
-                # timeout elapsed without data becoming available, bail out
-                return None
-
-            waited += time.time() - before
-
-    def _feed(self, data):
-        self._readbuf += data
-
-    def _response(self):
-        if len(self._readbuf) >= 6:
-            ret = unpack(">BBI", self._readbuf[0:6])
-            self._readbuf = self._readbuf[6:]
-
-            if ret[0] != 8:
-                raise ValueError("Got unknown command from APNs. Looks like protocol has been changed.")
-
-            return (ret[1], ret[2])
-
-        return None
-
-    def _feed_feedback(self, data):
-        self._feedbackbuf += data
-
-    def _read_feedback(self):
-        # FIXME: not the most efficient way to parse stream =)
-        while len(self._feedbackbuf) > 6:
-            timestamp, length = unpack(">IH", self._feedbackbuf[0:6])
-            if len(self._feedbackbuf) >= (6 + length):
-                token = binascii.hexlify(self._feedbackbuf[6:(length + 6)]).upper()
-                self._feedbackbuf = self._feedbackbuf[(length + 6):]
-                yield (token, timestamp)
-            else:
-                break
-
-
-class Session(object):
-    """ Persistent connection pool. """
-    # Connection wrapper class to use
-    connection_class = Connection
-
-    # Default APNs addresses.
-    ADDRESSES = {
-        "push_sandbox": ("gateway.sandbox.push.apple.com", 2195),
-        "push_production": ("gateway.push.apple.com", 2195),
-        "feedback_sandbox": ("feedback.sandbox.push.apple.com", 2196),
-        "feedback_production": ("feedback.push.apple.com", 2196),
-    }
-    
-    def __init__(self):
-        """ Persistent connection pool.
-
-            It is a good idea to keep your connection open to APNs if you
-            expect to send another message within few minutes. SSL hanshaking
-            is slow, so preserving a connection will increase your message
-            throughput.
-            
-            This class keeps connection descriptors for you, but it is your
-            responsibility to keep reference to session instances, otherwise
-            the session will be garbage collected and all connections will be
-            closed.
-        """
-        self._connections = {}
-
-    @classmethod
-    def new_connection(cls, address="feedback_sandbox", certificate=None, **cert_params):
-        """ Obtain non-cached connection to APNs.
-            
-            Unlike :func:`get_connection` this method does not cache the
-            connection.  Use it to fetch feedback from APNs and then close when
-            you are done.
-
-            :Arguments:
-                - `address` (str or tuple): target address.
-                - `certificate` (:class:`Certificate`): provider's certificate instance.
-                - `cert_params` (kwargs): :class:`Certificate` arguments, used if `certificate` instance is not given.
-        """
-        if isinstance(address, six.string_types):
-            addr = cls.ADDRESSES.get(address)
-            if addr is None:
-                raise ValueError("Unknown address mapping: {0}".format(address))
-
-            address = addr
-
-        if certificate is not None:
-            cert = certificate
-        else:
-            cert = Certificate(**cert_params)
-
-        return cls.connection_class(address, cert)
-
-    def get_connection(self, address="push_sanbox", certificate=None, **cert_params):
-        """ Obtain cached connection to APNs.
-
-            Session caches connection descriptors, that remain open after use.
-            Caching saves SSL handshaking time. Handshaking is lazy, it will be
-            performed on first message send.
-
-            You can provide APNs address as ``(hostname, port)`` tuple or as
-            one of the strings:
-
-                - `push_sanbox` -- ``("gateway.sandbox.push.apple.com", 2195)``, the default.
-                - `push_production` -- ``("gateway.push.apple.com", 2195)``
-                - `feedback_sandbox` -- ``("gateway.push.apple.com", 2196)``
-                - `feedback_production` -- ``("gateway.sandbox.push.apple.com", 2196)``
-
-            :Arguments:
-                - `address` (str or tuple): target address.
-                - `certificate` (:class:`Certificate`): provider's certificate instance.
-                - `cert_params` (kwargs): :class:`Certificate` arguments, used if `certificate` instance is not given.
-        """
-        if isinstance(address, six.string_types):
-            addr = self.ADDRESSES.get(address)
-            if addr is None:
-                raise ValueError("Unknown address mapping: {0}".format(address))
-
-            address = addr
-
-        if certificate is not None:
-            cert = certificate
-        else:
-            cert = Certificate(**cert_params)
-
-        key = (address, cert)
-        if key not in self._connections:
-            self._connections[key] = self.connection_class(address, cert)
-
-        return self._connections[key]
-
-    def outdate(self, delta):
-        """ Close open connections that are not used in more than ``delta`` time.
-
-            You may call this method in a separate thread or run it in some
-            periodic task. If you don't, then all connections will remain open
-            until session is shut down. It might be an issue if you care about
-            your open server connections.
-
-            :Arguments:
-                `delta` (``timedelta``): maximum age of unused connection.
-
-            :Returns:
-                Number of closed connections.
-        """
-        # no need to lock _connections, Python GIL will ensures exclusive access
-        to_check = self._connections.values()
-
-        # any new connection added to _connections in parallel are assumed to be
-        # within delta.
-        ret = 0
-        for con in to_check:
-            if con.try_acquire():
-                try:
-                    if not con.is_closed() and con.is_outdated(delta):
-                        con.close()
-                        ret += 1
-                finally:
-                    con.release()
-
-        return ret
-
-    def shutdown(self):
-        """ Shutdown all connections.
-
-            Method iterates over all connections ever used and closes them one
-            by one. If connection is in use, then method will wait until consumer
-            is finished.
-        """
-        to_check = self._connections.values()
-        for con in to_check:
-            try:
-                with con:
-                    con.close()
-            except:
-                pass
-
-    def __del__(self):
-        """ Last chance to shutdown() """
-        self.shutdown()
+# module level logger
+LOG = logging.getLogger(__name__)
 
 
 class APNs(object):
     """ APNs multicaster. """
 
-    def __init__(self, connection, packet_size=2048, tail_timeout=0.5):
+    def __init__(self, connection):
         """ APNs client.
 
-            It is a good idea to keep your ``packet_size`` close to MTU for
-            better networking performance. However, if packet fails without
-            any feedback from APNs, then all device tokens in the packet will
-            be considered to have failed.
-
-            The ``tail_timeout`` argument defines timeouts for all networking
-            operations. APNs protocol does not define a *success* message, so
-            in order to be sure the batch was successfully processed, we have
-            to wait for any response at the end of :func:`send`. So, any send
-            will take time needed for sending everything plus ``tail_timeout``.
-            Blame Apple for this.
-        
             :Arguments:
-                - `connection` (:class:`Connection`): the connection to talk to.
-                - `packet_size` (int): minimum size of IO buffer in bytes.
-                - `tail_timeout` (float): timeout for final read in seconds.
+                - connection (:class:`Connection`): the connection to talk to.
         """
         self._connection = connection
-        self.packet_size = packet_size
-        self.tail_timeout = tail_timeout
 
     def send(self, message):
         """ Send the message.
@@ -620,49 +50,14 @@ class APNs(object):
             :Returns:
                 :class:`Result` object with operation results.
         """
-        with self._connection:
-            # ensure connection is up, may raise all kinds of exceptions
-            self._connection.refresh()
-
-            # serialize to binary in chunks of packet_size. Choose packet_size large
-            # enough for good networking performance.
-            batch = message.batch(self.packet_size)
-            failed_after = None
-            for sent, chunk in batch:
-                # blocking write
-                if not self._connection.send(chunk):  # may fail on IO
-                    # socket is closed, check what happened
-                    failed_after = sent
-                    break
-
-                # non-blocking read
-                ret = self._connection.peek()
-                if ret is not None and ret[0] != 0:
-                    # some shit had happened, response from APNs, bail out and prepare for retry
-                    self._connection.close()
-                    return Result(message, ret)
-
-            # blocking read for at most tail_timeout
-            ret = self._connection.pull(self.tail_timeout)
-            if ret is not None and ret[0] != 0:
-                # some shit had indeed happened
-                self._connection.close()
-                return Result(message, ret)
-
-            # OK, we have nothing received from APNs, but maybe this is due to timeout.
-            # Check if we were abrubtly stopped because connection was closed
-            if failed_after is not None:
-                # unknown error happened, we assume everything after last successful
-                # send can be retried. It does not hurt to ensure/close again.
-                self._connection.close()
-                ret = (255, failed_after + 1)
-                return Result(message, ret)
-
-            # we have sent message to all target tokens and have waited for
-            # tail_timeout for any error reponse to arrive. Nothing arrived and
-            # we did not fail middle on the road, so according to Apple's
-            # manual everything went OK. Still, this protocol sucks.
+        # serialize to binary in chunks of packet_size. Choose packet_size large
+        # enough for good networking performance.
+        if len(message.tokens) == 0:
+            LOG.warning("Message without device tokens is ignored")
             return Result(message)
+
+        status = self._connection.send(message)
+        return Result(message, status)
 
     def feedback(self):
         """ Fetch feedback from APNs.
@@ -677,16 +72,10 @@ class APNs(object):
             non-cached connection. Once whole feedback has been read, this
             method will automatically close the connection.
 
-            .. note::
-                On any IO/SSL error this method will simply stop iterating and
-                will close the connection. There is nothing you can do in case
-                of an error. Just let it fail, next time yo uwill fetch the
-                rest of the failed tokens.
-
             Example::
 
                 con = Session.new_connection("feedback_production", cert_string=db_certificate)
-                service = APNs(con, tail_timeout=10)
+                service = APNs(con)
                 for token, when in service.feedback():
                     print "Removing token ", token
 
@@ -695,17 +84,12 @@ class APNs(object):
         """
         # FIXME: this library is not idiot proof. If you store returned generator
         # somewhere, then yes, the connection will remain locked.
-        with self._connection:
-            # ensure connection is up, may raise all kinds of exceptions
-            self._connection.refresh()
-            while True:
-                items = self._connection.feedback(self.packet_size, self.tail_timeout)
-                if items is not None:
-                    for token, timestamp in items:
-                        yield (token, datetime.datetime.fromtimestamp(timestamp))
-                else:
-                    # a timeout or failure or socket was closed.
-                    break
+        for token, timestamp in self._connection.feedback():
+            yield (token, self.datetime_from_timestamp(timestamp))
+
+    def datetime_from_timestamp(self, timestamp):
+        """ Converts integer timestamp to ``datetime`` object. """
+        return datetime.datetime.fromtimestamp(timestamp)
 
 
 class Message(object):
@@ -715,60 +99,95 @@ class Message(object):
         'separators': (',',':'),
         'ensure_ascii': False,
     }
+    # Default expiry (1 day).
+    DEFAULT_EXPIRY = datetime.timedelta(days=1)
+    # Callable, used to obtain current datetime.
+    current_time = datetime.datetime.now
 
-    def __init__(self, tokens, alert=None, badge=None, sound=None, content_available=None, expiry=None, payload=None, priority=10, **extra):
+    def __init__(self, tokens, alert=None, badge=None, sound=None, content_available=None,
+                 expiry=None, payload=None, priority=10, extra=None, **extra_kwargs):
         """ The push notification to one or more device tokens.
 
             Read more `about payload
             <https://developer.apple.com/library/mac/documentation/NetworkingInternet/Conceptual/RemoteNotificationsPG/Chapters/ApplePushService.html#//apple_ref/doc/uid/TP40008194-CH100-SW1>`_.
 
+            .. note::
+                In order to stay future compatible this class doesn't transform
+                provided arguments in any way. It is your responsibility to
+                provide correct values and ensure the payload does not exceed
+                the limit of 256 bytes. You can also generate whole payload
+                yourself and provide it via ``payload`` argument. If you do
+                provide your own payload as an already serialized byte array,
+                then standard fields like alert will become unavailable.
+
             :Arguments:
-                - `tokens` (str or list): set of device tokens where to message will be sent.
-                - `alert` (str or dict): the message; read APNs manual for recognized dict keys (localized messages).
-                - `badge` (int or str): badge number over the application icon or "
-                - `sound` (str): sound file to play on arrival.
-                - `content_available` (int): set to 1 to indicate new content is available.
-                - `expiry` (int or datetime or timedelta): timestamp when message will expire
-                - `payload` (dict): JSON-compatible dictionary with the
-                                    complete message payload. If supplied, it
-                                    is given instead of all the other, more
-                                    specific parameters.
-                - `priority` (int): priority of th emessage, 10 (default) or 5.
-                - `extra` (kwargs): extra payload key-value pairs.
+                - tokens (str or list): set of device tokens where to message will be sent.
+                - alert (str or dict): the message; read APNs manual for recognized dict keys.
+                - badge (int or str): badge number over the application icon or special value such as "increment".
+                - sound (str): sound file to play on arrival.
+                - content_available (int): set to 1 to indicate new content is available.
+                - expiry (int or datetime or timedelta): timestamp when message will expire.
+                - payload (dict or str): JSON-compatible dictionary with the
+                                   complete message payload. If supplied, it
+                                   is given instead of all the other, more
+                                   specific parameters.
+                - priority (int): priority of th emessage, 10 (default) or 5.
+                - extra (dict): extra payload key-value pairs.
+                - extra_kwargs (kwargs): extra payload key-value paris, will be merged with ``extra``.
         """
-        if (payload is not None and (
-                alert is not None or badge is not None or sound is not None or content_available is not None or extra)):
-            # Raise an error if both `payload` and the more specific
-            # parameters are supplied.
+        if payload is not None and ([v for v in (alert, badge, sound, content_available, extra) if v is not None] or extra_kwargs):
+            # Raise an error if both `payload` and the more specific parameters are supplied.
             raise ValueError("Payload specified together with alert/badge/sound/content_available/extra.")
 
-        if isinstance(tokens, six.string_types):
+        if isinstance(tokens, six.string_types) or isinstance(tokens, six.binary_type):
             tokens = [tokens]
 
         self._tokens = tokens
-        self.alert = alert
-        self.badge = badge
-        self.sound = sound
-        self.content_available = content_available
-        self.priority = priority
-        self.extra = extra
         self._payload = payload
+        self.priority = int(priority)  # has to be integer because will be formatted into a binary
+        self.expiry = self._get_expiry_timestamp(expiry)
 
+        if payload is not None and hasattr(payload, "get") and payload.get("aps"):
+            # try to reinit fields from the payload
+            aps = payload["aps"]
+            self.alert = aps.get("alert")
+            self.badge = aps.get("badge")
+            self.sound = aps.get("sound")
+            self.content_available = aps.get("content-available")
+            self.extra = {k: v for k, v in six.iteritems(payload) if k != 'aps'}
+        elif payload is None:
+            # normal message initialization
+            self.alert = alert
+            self.badge = badge
+            self.sound = sound
+            self.content_available = content_available
+            _extra = {}
+            if extra:
+                _extra.update(extra)
+            if extra_kwargs:
+                _extra.update(extra_kwargs)
+            self.extra = _extra
+            if 'aps' in self.extra:
+                raise ValueError("Extra payload data may not contain 'aps' key.")
+        # else: payload provided as unrecognized value, don't init fields,
+        # they will raise AttributeError on access
+
+    def _get_expiry_timestamp(self, expiry):
+        """ Convert expiry value to a timestamp (integer).
+            Provided value can be a date or timedelta.
+        """
         if expiry is None:
             # 0 means do not store messages at all. so we have to choose default
             # expiry, which is here 1 day.
-            expiry = datetime.timedelta(days=1)
+            expiry = self.DEFAULT_EXPIRY
 
         if isinstance(expiry, datetime.timedelta):
-            expiry = datetime.datetime.now() + expiry
+            expiry = self.current_time() + expiry
 
         if isinstance(expiry, datetime.datetime):
             expiry = time.mktime(expiry.timetuple())
 
-        self.expiry = int(expiry)
-
-        if 'aps' in self.extra:
-            raise ValueError("Extra payload data may not contain 'aps' key.")
+        return int(expiry)
 
     def __getstate__(self):
         """ Returns ``dict`` with ``__init__`` arguments.
@@ -795,17 +214,14 @@ class Message(object):
         """
         if self._payload is not None:
             return {
-                'payload': self._payload,
                 'tokens': self.tokens,
                 'expiry': self.expiry,
+                'payload': self._payload,
                 'priority': self.priority,
             }
 
-        ret = dict((key, getattr(self, key)) for key in ('tokens', 'alert', 'badge', 'sound', 'content_available', 'expiry', 'priority'))
-        if self.extra:
-            ret.update(self.extra)
-
-        return ret
+        return {key: getattr(self, key) for key in ('tokens', 'alert', 'badge',
+                    'sound', 'content_available', 'expiry', 'priority', 'extra')}
     
     def __setstate__(self, state):
         """ Overwrite message state with given kwargs. """
@@ -816,18 +232,24 @@ class Message(object):
 
         if 'payload' in state:
             self._payload = state['payload']
-            self.alert = None
-            self.badge = None
-            self.sound = None
-            self.content_available = None
+            if hasattr(self._payload, "get") and self._payload.get("aps"):
+                aps = self._payload["aps"]
+                self.alert = aps.get("alert")
+                self.badge = aps.get("badge")
+                self.sound = aps.get("sound")
+                self.content_available = aps.get("content-available")
+                self.extra = {k: v for k, v in six.iteritems(self._payload) if k != 'aps'}
         else:
             self._payload = None
             for key, val in six.iteritems(state):
-                if key in ('tokens', 'expiry'): # already set
+                if key in ('tokens', 'expiry', 'priority'): # already set
                     pass
-                elif key in ('alert', 'badge', 'sound', 'content_available', 'priority'):
+                elif key in ('alert', 'badge', 'sound', 'content_available'):
                     setattr(self, key, state[key])
+                elif key == 'extra':
+                    self.extra.update(state[key])
                 else:
+                    # legacy serialized object
                     self.extra[key] = val
 
     @property
@@ -837,7 +259,7 @@ class Message(object):
 
     @property
     def payload(self):
-        """ Returns the payload content as a `dict`. """
+        """ Returns the payload content as a dict or raw ``payload`` argument value. """
         if self._payload is not None:
             return self._payload
         
@@ -845,14 +267,14 @@ class Message(object):
         # alert or content-available.
         aps = {}
 
-        if self.alert:
+        if self.alert is not None:
             aps['alert'] = self.alert
 
         if self.badge is not None:
             aps['badge'] = self.badge
 
         if self.sound is not None:
-            aps['sound'] = str(self.sound)
+            aps['sound'] = self.sound
 
         if self.content_available is not None:
             aps['content-available'] = self.content_available
@@ -868,15 +290,21 @@ class Message(object):
 
     def get_json_payload(self):
         """ Convert message to JSON payload, acceptable by APNs. Must return byte string. """
-        ret = json.dumps(self.payload, **self.json_parameters)
-        if isinstance(ret, six.string_types):
-            ret = ret.encode("utf-8")
+        payload = self.payload
+        if not isinstance(payload, six.string_types) and not isinstance(payload, six.binary_type):
+            payload = json.dumps(payload, **self.json_parameters)
 
-        return ret
+        # in python2 json will output utf-8 encoded str. in python3 json will output
+        # a unicode string. So only for python3 in case of unicode string - encode.
+        if not isinstance(payload, six.binary_type):
+            payload = payload.encode("utf-8")
+
+        return payload
 
     def batch(self, packet_size):
         """ Returns binary serializer. """
         payload = self.get_json_payload()
+        assert isinstance(payload, six.binary_type), "Payload must be bytes/binary"
         return Batch(self._tokens, payload, self.expiry, self.priority, packet_size)
 
     def retry(self, failed_index, include_failed):
@@ -889,23 +317,25 @@ class Message(object):
             # nothing to retry
             return None
 
-        return Message(failed, self.alert, badge=self.badge, sound=self.sound,
+        return Message(failed, alert=self.alert, badge=self.badge, sound=self.sound,
                     content_available=self.content_available, expiry=self.expiry,
-                    priority=self.priority, **self.extra)
+                    priority=self.priority, extra=self.extra)
 
 
 class Batch(object):
     """ Binary stream serializer. """
+    # Frame version. Do not change unless you update binary formats too.
+    VERSION = 2
 
     def __init__(self, tokens, payload, expiry, priority, packet_size):
         """ New serializer.
 
             :Arguments:
-                - `tokens` (list): list of target target device tokens.
-                - `payload` (str): JSON payload.
-                - `expiry` (int): expiry timestamp.
-                - `priority` (int): message priority.
-                - `packet_size` (int): minimum chunk size in bytes.
+                - tokens (list): list of target target device tokens.
+                - payload (str): JSON payload.
+                - expiry (int): expiry timestamp.
+                - priority (int): message priority.
+                - packet_size (int): minimum chunk size in bytes.
         """
         self.tokens = tokens
         self.payload = payload
@@ -924,8 +354,8 @@ class Batch(object):
             tok = binascii.unhexlify(token)
             # |COMMAND|FRAME-LEN|{token}|{payload}|{id:4}|{expiry:4}|{priority:1}
             frame_len = 3*5 + len(tok) + len(self.payload) + 4 + 4 + 1 # 5 items, each 3 bytes prefix, then each item length
-            fmt = ">BIBH%ssBH%ssBHIBHIBHB" % (len(tok), len(self.payload))
-            message = pack(fmt, 2, frame_len,
+            fmt = ">BIBH{0}sBH{1}sBHIBHIBHB".format(len(tok), len(self.payload))
+            message = pack(fmt, self.VERSION, frame_len,
                     1, len(tok), tok,
                     2, len(self.payload), self.payload,
                     3, 4, idx,
@@ -959,7 +389,7 @@ class Result(object):
         6: ('Invalid topic size', False, True), # can not happen, we do not send topic, it is part of certificate. bail out.
         7: ('Invalid payload size', False, True), # our payload is probably too big. bail out.
         8: ('Invalid token', True, False), # our device token is broken, skipt it and retry
-        10: ('Shutdown', True, None), # server went into maintenance mode. reported token is the last success, skip it and retry.
+        10: ('Shutdown', True, False), # server went into maintenance mode. reported token is the last success, skip it and retry.
         None: ('Unknown', True, True), # unknown error, for sure we try again, but user should limit number of retries
     }
 
@@ -981,7 +411,12 @@ class Result(object):
                 # may be None if failed on last token, which is skipped
                 self._retry_message = message.retry(failed_index, include_failed)
 
-            if include_failed is False: # report broken token, it was skipped
+            if reason == 10:
+                # the Shutdown reason is not really an error, it just indicates
+                # the server went into a maintenance mode and connection was closed.
+                # The reported token is the last one successfully sent.
+                pass
+            elif not include_failed: # report broken token, it was skipped
                 self._failed = {
                     message.tokens[failed_index]: (reason, expl)
                 }
@@ -989,6 +424,12 @@ class Result(object):
                 self._errors = [
                     (reason, expl)
                 ]
+
+            if LOG.isEnabledFor(logging.DEBUG):
+                LOG.debug("Batch of %d tokens failed: %s.%s%s",
+                          len(message.tokens), expl,
+                          ' With errors.' if self._errors else '',
+                          ' With failed tokens.' if self._failed else '')
 
     @property
     def errors(self):
@@ -1023,7 +464,18 @@ class Result(object):
         return self._failed
 
     def needs_retry(self):
-        """ Returns True if there are tokens that could be retried. """
+        """
+            Returns True if there are tokens that should be retried.
+
+            .. note::
+                In most cases if ``needs_retry`` is true, then the reason of
+                incomplete batch is to be found in ``errors`` and ``failed``
+                properties. However, Apple added recently a special code *10
+                - Shutdown*, which indicates server went into maintenance mode
+                without completing the batch. This response is not really an
+                error, so the before mentioned properties will be empty, while
+                ``needs_retry`` will be true.
+        """
         return self._retry_message is not None
 
     def retry(self):
