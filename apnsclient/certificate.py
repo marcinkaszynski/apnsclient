@@ -20,7 +20,7 @@ import six
 
 __all__ = ('Certificate', )
 
-# module level logger
+# module level logger, defaults to apnsclient.certificate
 LOG = logging.getLogger(__name__)
 
 

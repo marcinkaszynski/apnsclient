@@ -168,28 +168,73 @@ class BaseConnection(object):
         self.last_use = datetime.datetime.now()
 
     def is_outdated(self, delta):
-        """ Returns True if ``delta`` time has not been passed since the last use. """
+        """ Returns True if ``delta`` time has not been passed since the last use.
+        
+            :Arguments:
+                - delta (datetime.timedelta): last use TTL.
+        """
         return (datetime.datetime.now() - self.last_use) > delta
 
     def closed(self):
-        """ Returns True if connection is closed via explicit ``close()`` call.
+        """ Returns True if connection is closed via explicit :func:`close' call.
             If ``backend.can_detect_close`` is False, then this method is allowed
             to return False even if underlying connection has been closed by itself.
+
+            .. warning::
+                This method is not allowed to throw any exceptions, except
+                those that indicate catestrophic events (such as
+                out-of-memory). On any IO related failure this method should
+                always return True.
+
+            :Returns:
+                True if connection is closed or check has been failed, otherwise
+                returns True.
         """
         raise NotImplementedError
 
     def close(self):
-        """ Close connection and free underlying resources. """
+        """ Close connection and free underlying resources.
+            
+            .. warning::
+                This method is not allowed to throw any exceptions, except
+                those that indicate catestrophic events (such as
+                out-of-memory). On any IO related failure this method should
+                simply supress the problem and set :func:`closed` state True.
+        """
         raise NotImplementedError
 
     def reset(self):
-        """ Clear read and write buffers. Called before starting a new IO session. """
+        """ Clear read and write buffers. Called before starting a new IO session
+            using a cached connection.
+        
+            .. warning::
+                This method is not allowed to throw any exceptions, except
+                those that indicate catestrophic events (such as
+                out-of-memory). On any IO related failure this method should
+                always return None.
+            
+            :Returns:
+                None in case of any failure, True otherwise.
+        """
         raise NotImplementedError
 
     def write(self, data, timeout):
-        """ Write chunk of data. Returns True`if data is completely written,
+        """ Write chunk of data. Returns True if data is completely written,
             otherwise returns None indicating IO failure or that timeout has
             been exceeded.
+
+            .. warning::
+                This method is not allowed to throw any exceptions, except
+                those that indicate catestrophic events (such as
+                out-of-memory). On any IO related failure this method should
+                always return None.
+
+            :Arguments:
+                - data (bytes): data to write.
+                - timeout (float): IO timeout for write operation, 0 is not allowed.
+
+            :Returns:
+                None in case of any failure or IO timeout, True otherwise.
         """
         raise NotImplementedError
 
@@ -198,9 +243,23 @@ class BaseConnection(object):
             timeout is exceeded. If timeout is zero, then method is not allowed
             to block, but has to return data available in the read buffer or fail
             immediatelly.
+
+            .. warning::
+                This method is not allowed to throw any exceptions, except
+                those that indicate catestrophic events (such as
+                out-of-memory). On any IO related failure this method should
+                always return None.
+
+            :Arguments:
+                - size (int): max number of bytes to read.
+                - timeout (float): IO timeout for read operation, 0 indicates non-blocking read.
+
+            :Returns:
+                Not empty sequence of bytes or None if data could not be read with
+                given timeout.
         """
         raise NotImplementedError
 
     def __del__(self):
-        """ Close conection ond destruction. """
+        """ Close conection on destruction. """
         self.close()

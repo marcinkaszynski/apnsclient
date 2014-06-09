@@ -25,7 +25,7 @@ import binascii
 
 __all__ = ('APNs', 'Message', 'Result')
 
-# module level logger
+# module level logger, defaults to "apnsclient.apns"
 LOG = logging.getLogger(__name__)
 
 
@@ -43,15 +43,31 @@ class APNs(object):
     def send(self, message):
         """ Send the message.
         
-            The method will block until the whole message is sent. Method returns
-            :class:`Result` object, which you can examine for possible errors and
-            retry attempts.
+            The method will block until the whole message is sent. The method
+            returns :class:`Result` object, which you can examine for possible
+            errors and retry attempts.
+
+            Example::
+
+                message = Message(["token 1", "token 2"], alert="Message")
+                con = Session.get_connection("push_production", cert_string=db_certificate)
+                service = APNs(con)
+                result = service.send(message)
+
+                for token, (reason, explanation) in result.failed.items():
+                    delete_token(token) # stop using that token
+
+                for reason, explanation in result.errors:
+                    pass # handle generic errors
+
+                if result.needs_retry():
+                    # extract failed tokens as new message
+                    message = message.retry()
+                    # re-schedule task with the new message after some delay
 
             :Returns:
                 :class:`Result` object with operation results.
         """
-        # serialize to binary in chunks of packet_size. Choose packet_size large
-        # enough for good networking performance.
         if len(message.tokens) == 0:
             LOG.warning("Message without device tokens is ignored")
             return Result(message)
@@ -72,22 +88,37 @@ class APNs(object):
             non-cached connection. Once whole feedback has been read, this
             method will automatically close the connection.
 
+            .. note::
+                On any failure this method will simply stop iteration as if the
+                stream has been ended. There is no need to handle any error
+                scenario. If you keep sending messages to invalid tokens, then
+                these will appear again in the feedback stream.
+
             Example::
 
                 con = Session.new_connection("feedback_production", cert_string=db_certificate)
                 service = APNs(con)
                 for token, when in service.feedback():
-                    print "Removing token ", token
+                    # every time a devices sends you a token, you should store
+                    # {token: given_token, last_update: datetime.datetime.now()}
+                    last_update = get_last_update_of_token(token)
+
+                    if last_update < when:
+                        # the token wasn't updated after the failure has
+                        # been reported, so the token is invalid and you should
+                        # stop sending messages to it.
+                        remove_token(token)
 
             :Returns:
-                generator over ``(str, datetime.datetime)``
+                generator over ``(binary, datetime)``
         """
         # FIXME: this library is not idiot proof. If you store returned generator
         # somewhere, then yes, the connection will remain locked.
         for token, timestamp in self._connection.feedback():
-            yield (token, self.datetime_from_timestamp(timestamp))
+            yield (token, self._datetime_from_timestamp(timestamp))
 
-    def datetime_from_timestamp(self, timestamp):
+    # override if you use custom datetime or weird timezones
+    def _datetime_from_timestamp(self, timestamp):
         """ Converts integer timestamp to ``datetime`` object. """
         return datetime.datetime.fromtimestamp(timestamp)
 
@@ -101,11 +132,12 @@ class Message(object):
     }
     # Default expiry (1 day).
     DEFAULT_EXPIRY = datetime.timedelta(days=1)
-    # Callable, used to obtain current datetime.
-    current_time = datetime.datetime.now
+    # Default message priority
+    DEFAULT_PRIORITY = 10
 
     def __init__(self, tokens, alert=None, badge=None, sound=None, content_available=None,
-                 expiry=None, payload=None, priority=10, extra=None, **extra_kwargs):
+                 expiry=None, payload=None, priority=DEFAULT_PRIORITY, extra=None,
+                 **extra_kwargs):
         """ The push notification to one or more device tokens.
 
             Read more `about payload
@@ -116,9 +148,11 @@ class Message(object):
                 provided arguments in any way. It is your responsibility to
                 provide correct values and ensure the payload does not exceed
                 the limit of 256 bytes. You can also generate whole payload
-                yourself and provide it via ``payload`` argument. If you do
-                provide your own payload as an already serialized byte array,
-                then standard fields like alert will become unavailable.
+                yourself and provide it via ``payload`` argument. The payload
+                will be parsed to init default fields like alert and badge.
+                However if parsing fails, then these standard fields will
+                become unavailable. If raw payload is provided, then other data
+                fields like alert or sound are not allowed.
 
             :Arguments:
                 - tokens (str or list): set of device tokens where to message will be sent.
@@ -128,10 +162,9 @@ class Message(object):
                 - content_available (int): set to 1 to indicate new content is available.
                 - expiry (int or datetime or timedelta): timestamp when message will expire.
                 - payload (dict or str): JSON-compatible dictionary with the
-                                   complete message payload. If supplied, it
-                                   is given instead of all the other, more
-                                   specific parameters.
-                - priority (int): priority of th emessage, 10 (default) or 5.
+                   complete message payload. If supplied, it is given instead
+                   of all the other, more specific parameters.
+                - priority (int): priority of the message, defaults to 10
                 - extra (dict): extra payload key-value pairs.
                 - extra_kwargs (kwargs): extra payload key-value paris, will be merged with ``extra``.
         """
@@ -139,6 +172,7 @@ class Message(object):
             # Raise an error if both `payload` and the more specific parameters are supplied.
             raise ValueError("Payload specified together with alert/badge/sound/content_available/extra.")
 
+        # single token is provided, wrap as list
         if isinstance(tokens, six.string_types) or isinstance(tokens, six.binary_type):
             tokens = [tokens]
 
@@ -172,6 +206,7 @@ class Message(object):
         # else: payload provided as unrecognized value, don't init fields,
         # they will raise AttributeError on access
 
+    # override if you use funky expiry values
     def _get_expiry_timestamp(self, expiry):
         """ Convert expiry value to a timestamp (integer).
             Provided value can be a date or timedelta.
@@ -182,12 +217,17 @@ class Message(object):
             expiry = self.DEFAULT_EXPIRY
 
         if isinstance(expiry, datetime.timedelta):
-            expiry = self.current_time() + expiry
+            expiry = self._get_current_datetime() + expiry
 
         if isinstance(expiry, datetime.datetime):
             expiry = time.mktime(expiry.timetuple())
 
         return int(expiry)
+
+    # override if you use funky timezones
+    def _get_current_datetime(self):
+        """ Returns current date and time. """
+        return datetime.datetime.now()
 
     def __getstate__(self):
         """ Returns ``dict`` with ``__init__`` arguments.
@@ -317,9 +357,9 @@ class Message(object):
             # nothing to retry
             return None
 
-        return Message(failed, alert=self.alert, badge=self.badge, sound=self.sound,
-                    content_available=self.content_available, expiry=self.expiry,
-                    priority=self.priority, extra=self.extra)
+        state = self.__getstate__()
+        state['tokens'] = failed
+        return Message(**state)
 
 
 class Batch(object):
@@ -471,8 +511,8 @@ class Result(object):
                 In most cases if ``needs_retry`` is true, then the reason of
                 incomplete batch is to be found in ``errors`` and ``failed``
                 properties. However, Apple added recently a special code *10
-                - Shutdown*, which indicates server went into maintenance mode
-                without completing the batch. This response is not really an
+                - Shutdown*, which indicates server went into a maintenance
+                mode before the batch completed. This response is not really an
                 error, so the before mentioned properties will be empty, while
                 ``needs_retry`` will be true.
         """

@@ -83,13 +83,22 @@ class Session(object):
                 except AttributeError:
                     raise ImportError("Can't load pool backend", pool)
 
-            pool = getattr(pool_module, "Backend")
+            try:
+                pool = getattr(pool_module, "Backend")
+            except AttributeError:
+                raise ImportError("Can't find Backend class in pool module", pool)
 
         # resolved or given as class
         if isinstance(pool, type):
             pool = pool(**pool_options)
 
         self.pool = pool
+        if LOG.isEnabledFor(logging.DEBUG):
+            LOG.debug("New session, WB: %sb/%ss, RB: %sb/%ss, TT: %ss, Pool: %s",
+                      write_buffer_size, write_timeout,
+                      read_buffer_size, read_timeout,
+                      read_tail_timeout,
+                      pool.__class__.__module__)
 
     def get_address(cls, address):
         """ Maps address to (host, port) tuple. """
@@ -167,6 +176,12 @@ class Session(object):
             :Arguments:
                 delta (``timedelta``): maximum age of unused connection.
         """
+        if LOG.isEnabledFor(logging.DEBUG):
+            if delta.total_seconds() == 0.0:
+                LOG.debug("Shutdown session")
+            else:
+                LOG.debug("Outdating session with delta: %s", delta)
+
         self.pool.outdate(delta)
 
     def shutdown(self):
@@ -214,22 +229,41 @@ class Connection(object):
 
     def __enter__(self):
         try:
+            if LOG.isEnabledFor(logging.DEBUG):
+                LOG.debug("Entering networking session")
+
             self._lock.acquire() # block until lock is given
             self._open_connection()
         except:
+            if LOG.isEnabledFor(logging.DEBUG):
+                LOG.debug("Failed to enter networking session to address: %r", self.address, exc_info=True)
+
             self._lock.release()
             raise
 
     def __exit__(self, exc_type, exc_value, traceback):
-        if self._connection:
-            # terminate connection in case of an error
-            self._close(terminate=exc_type is not None)
+        try:
+            if LOG.isEnabledFor(logging.DEBUG):
+                LOG.debug("Leaving networking session%s%s",
+                          " with still open connection" if self._connection else "",
+                          " because of failure" if exc_type else "",
+                          exc_info=(exc_type is not None))
 
-        self._lock.release()
+            if self._connection:
+                # terminate connection in case of an error
+                self._close(terminate=exc_type is not None)
+        finally:
+            self._lock.release()
 
     def send(self, message):
         """ Send message. """
         with self:
+            if not self._connection:
+                if LOG.isEnabledFor(logging.INFO):
+                    LOG.info("Failed to obtain message connection to address %r", self.address)
+                # general error from the first token
+                return (255, 0)
+
             batch = message.batch(self.session.write_buffer_size)
             failed_after = None
             first = True
@@ -267,12 +301,13 @@ class Connection(object):
                     status = decoder.decode()
                     if status is not None and status[0] != 0: # No errors encountered
                         if LOG.isEnabledFor(logging.INFO):
-                            LOG.info("Message send failed midway with status %r to address %r. Bytes sent: %s",
-                                     status, self._connection.address, total_sent)
+                            LOG.info("Message send failed midway with status %r to address %r. Sent successful tokens: %s, bytes: %s",
+                                     status, self.address, sent, total_sent)
 
                         # some shit had happened, response from APNs, bail out and prepare for retry
                         self._close(terminate=True)
                         return status
+                # else: no status frame is read, keep sending
 
             # status, only success or None.
             # status frame not yet received, blocking read for at most tail_timeout
@@ -284,7 +319,7 @@ class Connection(object):
                     if status is not None and status[0] != 0:
                         if LOG.isEnabledFor(logging.INFO):
                             LOG.info("Message send failed with status %r to address %r. Bytes sent: %s",
-                                     status, self._connection.address, total_sent)
+                                     status, self.address, total_sent)
 
                         # some shit had indeed happened
                         self._close(terminate=True)
@@ -300,8 +335,8 @@ class Connection(object):
             # Check if we were abrubtly stopped because connection was closed
             if failed_after is not None:
                 if LOG.isEnabledFor(logging.INFO):
-                    LOG.info("Message send failed midway without status to address %r. Bytes sent: %s",
-                             status, self._connection.address, total_sent)
+                    LOG.info("Message send failed midway with status %r to address %r. Sent successful tokens: %s, bytes: %s",
+                             status, self.address, failed_after, total_sent)
 
                 # unknown error happened, we assume everything after last successful
                 # send can be retried. It does not hurt to ensure/close again.
@@ -314,8 +349,8 @@ class Connection(object):
             # we did not fail middle on the road, so according to Apple's
             # manual everything went OK. Still, this protocol sucks.
             if LOG.isEnabledFor(logging.DEBUG):
-                LOG.debug("Message sent successfully to address %r. Bytes sent: %s",
-                         self._connection.address, total_sent)
+                LOG.debug("Message sent successfully to address %r. Sent tokens: %s, bytes: %s",
+                         self.address, len(message.tokens), total_sent)
 
             self._close(terminate=not self._reused)
             return None
@@ -323,34 +358,41 @@ class Connection(object):
     def feedback(self):
         """ Read and parse feedback information. On failure stop iteration. """
         with self:
-            # first frame, ensuring connection
-            data = self._ensuring_io(lambda con: con.read(self.session.read_buffer_size, self.session.read_timeout))
-            feedback = FeedbackDecoder()
-            total_records = 0
-            while data is not None:
-                feedback.feed(data)
-                # TODO: use yield from
-                for record in feedback.decoded():
-                    total_records += 1
-                    yield record
+            if self._connection:
+                # first frame, ensuring connection
+                data = self._ensuring_io(lambda con: con.read(self.session.read_buffer_size, self.session.read_timeout))
+                feedback = FeedbackDecoder()
+                total_records = 0
+                while data is not None:
+                    feedback.feed(data)
+                    # TODO: use yield from
+                    for record in feedback.decoded():
+                        total_records += 1
+                        yield record
 
-                # read next chunk
-                data = self._connection.read(self.session.read_buffer_size, self.session.read_timeout)
+                    # read next chunk
+                    data = self._connection.read(self.session.read_buffer_size, self.session.read_timeout)
 
-            # there is no point to keep this connection open
-            if LOG.isEnabledFor(logging.DEBUG):
-                LOG.debug("Feedback received %s records from address %r",
-                         total_records, self._connection.address)
+                # there is no point to keep this connection open
+                if LOG.isEnabledFor(logging.DEBUG):
+                    LOG.debug("Feedback received %s records from address %r",
+                             total_records, self.address)
 
-            self._close(terminate=True)
+                self._close(terminate=True)
+            else:
+                if LOG.isEnabledFor(logging.INFO):
+                    LOG.info("Failed to obtain feedback connection to address %r", self.address)
+                # stop iterating, could not obtain connection
 
     def _ensuring_io(self, func):
         """ Re-opens connection if read or write has failed. Used to re-initialize
             connections from the pool with a transport not supporting reliable
             socket closed condition.
         """
-        self._connection.reset()  # clear read and write buffers
-        ret = func(self._connection) # perform IO, True or string on success, None on failure or timeout.
+        ret = self._connection.reset()  # clear read and write buffers
+        if ret:
+            ret = func(self._connection) # perform IO, True or string on success, None on failure or timeout.
+
         if ret is None:
             # failed, either because of IO error (socket closed) or timeout.
             # if pool.can_detect_close is False and we are reusing the connection
@@ -358,20 +400,25 @@ class Connection(object):
             # Re-get the connection from the pool again.
             if not self.session.pool.can_detect_close and self._reused:
                 if LOG.isEnabledFor(logging.DEBUG):
-                    LOG.debug("Re-ensuring connection to address %r", self._connection.address)
-
+                    LOG.debug("Re-ensuring connection to address %r", self.address)
                 # we won't release it, ensure it is surely closed
                 self._connection.close()
                 self._open_connection(by_failure=True)
                 if self.session.pool.use_cache_for_reconnects:
+                    if LOG.isEnabledFor(logging.DEBUG):
+                        LOG.debug("Re-connected using cached connection. IO-checking again: %r", self.address)
                     # if ensuring logic is asking for a new connection from the pool,
                     # then we have to re-ensure the connection.
                     return self._ensuring_io(func)
                 else:
+                    if LOG.isEnabledFor(logging.DEBUG):
+                        LOG.debug("Re-connected using new connection. Issuing raw IO: %r", self.address)
                     # ensuring logic was forced to open a fresh connection, which
                     # is open by definition. If we fail, then this is a real failure.
                     return func(self._connection)
-
+            else:
+                if LOG.isEnabledFor(logging.DEBUG):
+                    LOG.debug("IO failure to address %r. Not reconnecting.", self.address)
         # successful response or we can't reopen connection
         return ret
 
@@ -401,6 +448,7 @@ class Connection(object):
             self.session.pool.release(self._connection)
 
         self._connection = None
+
 
 # private
 class ResponseDecoder(object):

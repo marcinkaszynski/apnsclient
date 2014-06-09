@@ -275,13 +275,13 @@ class APNsTest(unittest.TestCase):
                 passphrase=PRIVATE_PASS
             )
 
-    #def test_default_pool_load(self):
-    #    session = Session()
-    #    self.assertIsNotNone(session.pool)
-    #    # we are not allowed to do any IO in tests, so no real connections.
-    #    # however, it is good idea to test utility functions even with empty pool.
-    #    session.outdate(datetime.timedelta(seconds=60))
-    #    session.shutdown()
+    def test_default_pool_load(self):
+        session = Session()
+        self.assertIsNotNone(session.pool)
+        # we are not allowed to do any IO in tests, so no real connections.
+        # however, it is good idea to test utility functions even with empty pool.
+        session.outdate(datetime.timedelta(seconds=60))
+        session.shutdown()
 
     def test_send(self):
         # success, retry + include-failed, don't-retry + include-failed
