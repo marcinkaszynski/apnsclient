@@ -10,7 +10,7 @@ def read(fname):
 
 setup(
     name='apns-client',
-    version='0.1.8',
+    version='0.2',
     author='Sardar Yumatov',
     author_email='ja.doma@gmail.com',
     url='https://bitbucket.org/sardarnl/apns-client',
@@ -19,8 +19,7 @@ setup(
     packages=['apnsclient'],
     license="Apache 2.0",
     keywords='apns push notification apple messaging iOS',
-    install_requires=['pyOpenSSL'],
-    test_require=['mock'],
+    install_requires=['pyOpenSSL', 'six'],
     classifiers = [ 'Development Status :: 4 - Beta',
                     'Intended Audience :: Developers',
                     'License :: OSI Approved :: Apache Software License',

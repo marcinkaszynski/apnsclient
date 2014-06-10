@@ -9,9 +9,9 @@ Check the client with similar interface for `Google Cloud Messaging <https://pyp
 Requirements
 ------------
 
+- `six <https://pypi.python.org/pypi/six/>`_ - Python 2 and 3 compatibility library.
 - `pyOpenSSL <https://pypi.python.org/pypi/pyOpenSSL/>`_ - OpenSSL wrapper.
-- `six <https://pypi.python.org/pypi/six/>`_ - Python 2 and 3 Compatibility library.
-- `omnijson <https://pypi.python.org/pypi/omnijson/>`_ if you use Python 2.5 or older.
+  Required by standard networking back-end.
 
 Standard library has support for `SSL transport
 <http://docs.python.org/2/library/ssl.html>`_. However, it is impossible to use
@@ -19,7 +19,9 @@ it with certificates provided as a string. We store certificates in database,
 because we handle different apps on many Celery worker machines. A dirty
 solution would be to create temporary files, but it is insecure and slow. So,
 we have decided to use a better OpenSSL wrapper and ``pyOpenSSL`` was the
-easiest to handle.
+easiest to handle. ``pyOpenSSL`` is loaded on demand by standard networking
+back-end. If you use your own back-end, based on some other SSL implementation,
+then you don't have to install ``pyOpenSSL``.
 
 
 Alternatives
@@ -43,6 +45,22 @@ differs in the following design decisions:
 - *Clean pythonic API*. No need for lots of classes, long lists of exceptions etc.
 - *Do not hard-code validation, let APNs fail*. This decision makes library
   a little bit more future proof.
+
+Changelog
+---------
+*v0.2*
+    Networking layer became pluggable, making ``gevent`` based implementations
+    possible. Everything is refactored, such that IO, multi-threading and SSL
+    are now loaded and used on demand, allowing you to cleanly override any
+    part of the client. The API is largely backward compatible. IO related
+    configuration is moved to transport layer and exception handling is a bit
+    more verbose. The client is using standard logging to send fine grained
+    debug messages.
+
+*v0.1*
+    First simple implementation, hardwired with raw sockets and ``pyOpenSSL``.
+    It does not work in ``gevent`` or any other *green* environment.
+
 
 Support
 -------

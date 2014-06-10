@@ -1,3 +1,10 @@
+2014-06-11  Sardar Yumatov  <ja.doma@gmail.com>
+    * version 0.2
+    * apnsclient/apns.py: total refactor, API is mostly backward compatible.
+    * apnsclient/certificate.py: pyOpenSSL became unnecessary for the core.
+    * apnsclient/transport.py: APNs protocol implementation, transport agnostic.
+    * apnsclient/backens/stdio.py: default transport using raw sockets and pyOpenSSL.
+
 2013-09-29  Sardar Yumatov  <ja.doma@gmail.com>
     * version 0.1.8
     * apnsclient/apns.py: minor fixes for raw _payload users.
