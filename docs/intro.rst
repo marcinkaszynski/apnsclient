@@ -37,7 +37,7 @@ The connections you obtain from ``Session`` are lazy and will be really
 established once you actually use it. Example of sending a message::
 
     # New message to 3 devices. You app will show badge 10 over app's icon.
-    messge = Message(["my", "device", "tokens"], alert="My message", badge=10)
+    message = Message(["my", "device", "tokens"], alert="My message", badge=10)
 
     # Send the message.
     srv = APNs(con)
@@ -46,7 +46,7 @@ established once you actually use it. Example of sending a message::
     # Check failures. Check codes in APNs reference docs.
     for token, reason in res.failed.items():
         code, errmsg = reason
-        print "Device faled: {0}, reason: {1}".format(token, errmsg)
+        print "Device failed: {0}, reason: {1}".format(token, errmsg)
 
     # Check failures not related to devices.
     for code, errmsg in res.errors:
