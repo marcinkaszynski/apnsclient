@@ -1,14 +1,15 @@
 APNs Client |release| documentation.
 ====================================
-Python client for `Apple Push Notification service (APNs) <https://developer.apple.com/library/mac/documentation/NetworkingInternet/Conceptual/RemoteNotificationsPG/Introduction.html#//apple_ref/doc/uid/TP40008194-CH1-SW1>`_.
+Python client for `Apple Push Notification service (APNs) <https://developer.apple.com/library/mac/documentation/NetworkingInternet/Conceptual/RemoteNotificationsPG/Chapters/ApplePushService.html>`_.
 
-Check out the client with similar interface for `Google Cloud Messaging <https://pypi.python.org/pypi/gcm-client/>`_.
+Check the client with similar interface for `Google Cloud Messaging <https://pypi.python.org/pypi/gcm-client/>`_.
 
 
 Requirements
 ------------
 
 - `pyOpenSSL <https://pypi.python.org/pypi/pyOpenSSL>`_ - OpenSSL wrapper.
+- `six <https://pypi.python.org/pypi/six/>`_ - Python 2 and 3 Compatibility library.
 - `omnijson <https://pypi.python.org/pypi/omnijson/>`_ if you use Python 2.5 or older.
 
 Standard library has support for `SSL transport

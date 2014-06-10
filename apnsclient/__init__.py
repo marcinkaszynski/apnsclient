@@ -1,4 +1,4 @@
-# Copyright 2013 Getlogic BV, Sardar Yumatov
+# Copyright 2014 Sardar Yumatov
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,13 +14,13 @@
 
 
 __title__ = 'APNS client'
-__version__ = "0.1.5"
+__version__ = "0.2"
 __author__ = "Sardar Yumatov"
 __contact__ = "ja.doma@gmail.com"
 __license__ = "Apache 2.0"
 __homepage__ = "https://bitbucket.org/sardarnl/apns-client/"
-__copyright__ = 'Copyright 2013 Getlogic BV, Sardar Yumatov'
+__copyright__ = 'Copyright 2014 Sardar Yumatov'
 
 
-from apnsclient.apns import *
-
+from apnsclient.apns import APNs, Message
+from apnsclient.transport import Session
