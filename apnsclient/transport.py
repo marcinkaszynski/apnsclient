@@ -46,7 +46,7 @@ class Session(object):
     # Default timeout for read operations.
     DEFAULT_READ_TIMEOUT = 20
     # Default timeout waiting for error response at the end message send operation.
-    DEFAULT_READ_TAIL_TIMEOUT = 1
+    DEFAULT_READ_TAIL_TIMEOUT = 3
     
     def __init__(self, pool="apnsclient.backends.stdio",
                        connect_timeout=DEFAULT_CONNECT_TIMEOUT,
@@ -116,12 +116,6 @@ class Session(object):
             address = addr
         return address
 
-    def get_certificate(self, cert_params):
-        """ Create/load certificate from parameters. """
-        # don't require pyOpenSSL by default, opening room for alternative implementations.
-        from .certificate import Certificate
-        return Certificate(**cert_params)
-
     def new_connection(self, address="feedback_sandbox", certificate=None, **cert_params):
         """ Obtain new connection to APNs. This method will not re-use existing
             connection from the pool. The connection will be closed after use.
@@ -132,13 +126,13 @@ class Session(object):
 
             :Arguments:
                 - address (str or tuple): target address.
-                - certificate (:class:`Certificate`): provider's certificate instance.
-                - cert_params (kwargs): :class:`Certificate` arguments, used if ``certificate`` instance is not given.
+                - certificate (:class:`BaseCertificate`): provider's certificate instance.
+                - cert_params (kwargs): :class:`BaseCertificate` arguments, used if ``certificate`` instance is not given.
         """
         if certificate is not None:
             cert = certificate
         else:
-            cert = self.get_certificate(cert_params)
+            cert = self.pool.get_certificate(cert_params)
 
         address = self.get_address(address)
         return Connection(address, cert, self, use_cache=False)
@@ -160,13 +154,13 @@ class Session(object):
 
             :Arguments:
                 - address (str or tuple): target address.
-                - certificate (:class:`Certificate`): provider's certificate instance.
-                - cert_params (kwargs): :class:`Certificate` arguments, used if ``certificate`` instance is not given.
+                - certificate (:class:`BaseCertificate`): provider's certificate instance.
+                - cert_params (kwargs): :class:`BaseCertificate` arguments, used if ``certificate`` instance is not given.
         """
         if certificate is not None:
             cert = certificate
         else:
-            cert = self.get_certificate(cert_params)
+            cert = self.pool.get_certificate(cert_params)
 
         address = self.get_address(address)
         return Connection(address, cert, self, use_cache=True)
@@ -209,7 +203,7 @@ class Connection(object):
             
             :Arguments:
                 - address (tuple) - (host, port) to connect to.
-                - certificate (:class:Certificate) - provider certificate.
+                - certificate (:class:`BaseCertificate`) - provider certificate.
                 - session (object) - parent session.
                 - use_cache (bool) - True if connections may be cached in the pool.
         """
@@ -219,19 +213,7 @@ class Connection(object):
         self.use_cache = use_cache
         self._reused = False
         self._connection = None
-        self._lock = self._create_lock()
-
-    def _create_lock(self):
-        """ Provides semaphore with ``threading.Lock`` interface. """
-        try:
-            # can be monkey patched by gevent/greenlet/etc or can be overriden
-            # entirely. The lock has to support .acquire() and .release() calls
-            # with standard semantics.
-            import threading as _threading
-        except ImportError:
-            import dummy_threading as _threading
-
-        return _threading.Lock()
+        self._lock = self.session.pool.create_lock()
 
     def __enter__(self):
         try:
@@ -239,7 +221,7 @@ class Connection(object):
                 LOG.debug("Entering networking session")
 
             self._lock.acquire() # block until lock is given
-            self._open_connection()
+            self._open_connection() # can raise exception, bubblit up to the top
         except:
             self._lock.release()
             raise
@@ -252,11 +234,16 @@ class Connection(object):
                           " because of failure" if exc_type else "",
                           exc_info=(exc_type is not None))
 
+            # the only possible scenario when connection is left open while
+            # we are here is when some totally unexpected exception bubbles up.
+            assert exc_type is not None or self._connection is None
             if self._connection:
                 # terminate connection in case of an error
-                self._close(terminate=exc_type is not None)
+                self._close(terminate=True)
         finally:
             self._lock.release()
+
+        # we return None, which is False, which forces python to re-raise on error
 
     def send(self, message):
         """ Send message. """
@@ -264,124 +251,190 @@ class Connection(object):
         with self:
             batch = message.batch(self.session.write_buffer_size)
             failed_after = None
-            first = True
-            decoder = ResponseDecoder()
             status = None
             total_sent = 0
-            for sent, chunk in batch:
+            decoder = ResponseDecoder()
+            for iteration, (sent, chunk) in enumerate(batch):
                 assert len(chunk) > 0
                 total_sent += len(chunk)
 
-                if first:
-                    # first IO, that may trigger connection reinitialization
-                    # will raise exception if cached connection has been used,
-                    # it appeared closed and the reconnect has been failed.
-                    ret = self._ensuring_io(lambda con: self._write(con, chunk, self.session.write_timeout))
-                    first = False
+                if iteration == 0:
+                    # can raise exception if new connection is failed to open.
+                    # write doesn't return anything, but we are interested in IO failures.
+                    _, io_exception = self._ensuring_io(lambda con: con.write(chunk, self.session.write_timeout))
+                    if io_exception is not None:
+                        # IO failure on first write, sent is 0 here, retry with
+                        # the whole message
+                        failed_after = sent
+                        break
                 else:
                     # other writes, that fail naturally
-                    ret = self._write(self._connection, chunk, self.session.write_timeout)
+                    try:
+                        ret = self._connection.write(chunk, self.session.write_timeout)
+                    except:
+                        # IO failure on subsequent writes, some of the tokens are
+                        # sent, break on the beginning of this batch
+                        failed_after = sent
+                        break
 
-                if ret is None:
-                    # socket is closed, check what happened
+                # check for possibly arriving failure frame
+                try:
+                    # should either return sequence of bytes or None if read buffer
+                    # is empty.
+                    ret = self._connection.peek(256) # status frame is 6 bytes
+                except:
+                    # Peek failed, which means our read operations fail
+                    # abnormaly. I don't like that and the final read will
+                    # probably fail too. So fail early, possibly messing the
+                    # first batch, but not everything
                     failed_after = sent
                     break
+                else:
+                    if ret is not None:
+                        decoder.feed(ret)
+                        # status is not None only if previous iteration got
+                        # successful status, but it appears not to be the last
+                        # chunk. this should not happen by APNs protocol, still
+                        # we have to handle it. the easy solution: ignore
+                        # previous status (probably garbage in read buffer)
+                        # with a warning.
+                        if status is not None:
+                            LOG.warning("Got success frame while batch is not comleted. Frame ignored.")
 
-                # non-blocking read
-                ret = self._read(self._connection, 256, 0) # status frame is 6 bytes
-                if ret is not None:
-                    decoder.feed(ret)
-                    # NOTE: status can be overriden on status.code == 0 :: No errors
-                    # because we got successframe without finishing all frames.
-                    # Looks like connection was reused and this is left over from
-                    # other session.
-                    if status is not None:
-                        LOG.warning("Got success frame while batch is not comleted. Frame ignored.")
+                        # NOTE: it is possible we get None here because not all
+                        # bytes could be read without blocking. on next iteration
+                        # or final blocking read we will get the rest of the bytes.
+                        status = decoder.decode()
+                        if status is not None and status[0] != 0: # error detected
+                            if LOG.isEnabledFor(logging.INFO):
+                                LOG.info("Message send failed midway with status %r to address %r. Sent tokens: %s, bytes: %s",
+                                         status, self.address, sent, total_sent)
 
-                    status = decoder.decode()
-                    if status is not None and status[0] != 0: # No errors encountered
-                        if LOG.isEnabledFor(logging.INFO):
-                            LOG.info("Message send failed midway with status %r to address %r. Sent successful tokens: %s, bytes: %s",
-                                     status, self.address, sent, total_sent)
+                            # some shit had happened, response from APNs, bail out and prepare for retry
+                            self._close(terminate=True)
+                            return status
+                    # else: nothing in the read buffer, keep sending
 
-                        # some shit had happened, response from APNs, bail out and prepare for retry
-                        self._close(terminate=True)
-                        return status
-                # else: no status frame is read, keep sending
+            # by this time we either stopped prematurely on IO error with
+            # failed_after set or we finished all batches, possibly having
+            # status read with non-blocking IO.
 
-            # status, only success or None.
-            # status frame not yet received, blocking read for at most tail_timeout
-            if status is None and self._connection:
+            # the write stream possibly failed, but the read stream might be still
+            # open with status frame precisely pointing to failed token.
+            if status is None:
                 # read status frame, could take 2 iterations if the fist one returns
                 # just the read buffer with few bytes not making the whole status frame.
                 while True:
-                    ret = self._read(self._connection, 256, self.session.read_tail_timeout)
-                    if ret:
-                        decoder.feed(ret)
-                        status = decoder.decode()
-                        if status is None:
-                            # not enough data read to construct complete status frame
-                            continue
-
-                        # complete status frame read, evaluate
-                        if status[0] != 0:
-                            if LOG.isEnabledFor(logging.INFO):
-                                LOG.info("Message send failed with status %r to address %r. Bytes sent: %s",
-                                         status, self.address, total_sent)
-
-                            # some shit had indeed happened
-                            self._close(terminate=True)
-                            return status
-
-                        # status is OK (which is part of APNs protocol, but in
-                        # documentation they say it isn't used). however, it is
-                        # possible that our sending loop ended prematurely with
-                        # failed_after set. break and evaluate further.
+                    try:
+                        ret = self._connection.read(256, self.session.read_tail_timeout)
+                    except:
+                        # one of two things had happened:
+                        #  - everything went fine, we waited for the final status
+                        #    frame the tail timeout of time and got nothing (timeout).
+                        #    this is a success condition according to APNs documentation
+                        #    if status frame with code 0 is not sent (it is never sent).
+                        #  - reading failed with some other exception. we don't know
+                        #    starting from which token the batch has failed. we can't
+                        #    attempt to read status frame again, because read stream
+                        #    is probably closed by now. there is nothing we can do
+                        #    except pretending everything is OK. the failed tokens
+                        #    will be reported by feedback. the tokens that didn't got
+                        #    the message... well, so is life, we can't detect them.
+                        #
+                        # Sorry, but this is how APNs protocol designed, I can't
+                        # do better here. APNs developers suck hard.
+                        #
+                        # We still have to check failed_after, it tells us when
+                        # IO write failed. If failed_after is not None, then
+                        # we got here probably because connection is closed for
+                        # read and write after the write failure.
                         break
                     else:
-                        # failed to read status frame, probably because of the
-                        # timeout, which means transaction is probably ended
-                        # successfully. APNs sucks. still we have to check failed_after.
+                        if ret is not None:
+                            decoder.feed(ret)
+                            status = decoder.decode()
+                            if status is None:
+                                # we got bytes, but not enogugh for the status frame.
+                                continue
+
+                            # complete status frame read, evaluate
+                            if status[0] != 0:
+                                if LOG.isEnabledFor(logging.INFO):
+                                    LOG.info("Message send failed with status %r to address %r. Sent tokens: %s, bytes: %s",
+                                             status, self.address, len(message.tokens), total_sent)
+
+                                # some shit had indeed happened
+                                self._close(terminate=True)
+                                return status
+
+                        # got a successful status or read ended with closed connection
                         break
 
-            # normall successs scenario with success frame provided.
+            # by this time we have either successful status frame (code 0) or
+            # we failed to obtain status frame at all. the failed_after is not None
+            # if IO write failed before.
+
+            # there are some bytes read, but we failed to read complete status
+            # frame.  all possible timeouts are exceeded or read stream is
+            # totally fucked up, so we can't wait and read again. let the user
+            # know this happened and treat the situation as if no frame was
+            # received at all. APNs protocol sucks sooo much.
+            if status is None and decoder._buf:
+                LOG.warning("Failed to read complete status frame from %r, but has read some bytes before. Probably read timeout %s is to short.",
+                            self.address, self.session.read_tail_timeout)
+
+                # close connection, it is failing
+                self._close(terminate=True)
+
+            # normall successs scenario with success frame provided. never
+            # happens according to APNs documentation (no status frame gets
+            # sent on success), but can happen logically.
             if failed_after is None and status is not None and status[0] == 0:
+                # success, release connection for re-use if it was meant for reuse
+                self._close(terminate=not self._reused)
                 return status
 
-            # OK, we have nothing received from APNs, but maybe this is due to timeout.
-            # Check if we were abrubtly stopped because connection was closed
+            # everything looks like success, but it might be because read stream
+            # was closed or just timeouted. check write IO failure.
             if failed_after is not None:
                 if LOG.isEnabledFor(logging.INFO):
-                    LOG.info("Message send failed midway with status %r to address %r. Sent successful tokens: %s, bytes: %s",
+                    LOG.info("Message send failed midway with status %r to address %r. Sent tokens: %s, bytes: %s",
                              status, self.address, failed_after, total_sent)
 
-                # unknown error happened, we assume everything after last successful
-                # send can be retried. It does not hurt to ensure/close again.
+                # close connection, it is failing
                 self._close(terminate=True)
-                ret = (255, failed_after + 1)
-                return ret
+                return (255, failed_after + 1)
 
             # we have sent message to all target tokens and have waited for
-            # tail_timeout for any error reponse to arrive. Nothing arrived and
-            # we did not fail middle on the road, so according to Apple's
-            # manual everything went OK. Still, this protocol sucks.
+            # tail_timeout for any error reponse to arrive. Nothing arrived
+            # (hopefully not because read error) and we did not fail with write
+            # failure middle on the road, so according to Apple's manual
+            # everything went OK. This protocol sucks.
             if LOG.isEnabledFor(logging.DEBUG):
                 LOG.debug("Message sent successfully to address %r. Sent tokens: %s, bytes: %s",
                          self.address, len(message.tokens), total_sent)
 
+            # success, release connection for re-use if it was meant for reuse
             self._close(terminate=not self._reused)
             return None
 
     def feedback(self):
         """ Read and parse feedback information. """
+        if self.use_cache:
+            # sanity check
+            LOG.warning("Don't use cached connections for feedback, you might get stale data.")
+
         # will raise exception if non-cached connection has been used
         with self:
-            # first frame, ensuring connection
-            # will raise exception if cached connection has been used, it appeared
-            # closed and the reconnect has been failed.
-            data = self._ensuring_io(lambda con: self._read(con, self.session.read_buffer_size, self.session.read_timeout))
+            # on connection failure we bubble up the exceptions. on IO failure
+            # we get the exception as return value, stopping the iteration normally.
+            data, io_exception = self._ensuring_io(lambda con: con.read(self.session.read_buffer_size, self.session.read_timeout))
+            # data is non empty sequence of bytes on success, None if connection
+            # has been closed or on failure. io_exception is not None on IO errors.
+
             feedback = FeedbackDecoder()
             total_records = 0
+            failed = io_exception is None
             while data is not None:
                 feedback.feed(data)
                 # TODO: use yield from
@@ -389,14 +442,22 @@ class Connection(object):
                     total_records += 1
                     yield record
 
-                # read next chunk
-                data = self._read(self._connection, self.session.read_buffer_size, self.session.read_timeout)
+                try:
+                    # read next chunk, leaving again either sequence of bytes or
+                    # None if connection has been closed.
+                    data = self._connection.read(self.session.read_buffer_size, self.session.read_timeout)
+                except:
+                    # IO failure, probably because of a timeout. break the loop,
+                    # we will fetch the rest during the next session.
+                    failed = True
+                    break
 
             # there is no point to keep this connection open
             if LOG.isEnabledFor(logging.DEBUG):
-                LOG.debug("Feedback received %s records from address %r",
-                         total_records, self.address)
+                LOG.debug("Feedback received %s records from address %r. Stopped %s",
+                         total_records, self.address, "by failure" if failed else "successfully")
 
+            # always close feedback connection, preventing stale data
             self._close(terminate=True)
 
     def _ensuring_io(self, func):
@@ -404,47 +465,41 @@ class Connection(object):
             connections from the pool with a transport not supporting reliable
             socket closed condition.
         """
-        try:
-            self._connection.reset()  # clear read and write buffers
-        except:
-            LOG.info("Failed to reset connection to %r", self.address, exc_info=True)
-            self._connection.close()
-            ret = None
-        else:
-            # OK, perform first IO
-            ret = func(self._connection) # perform IO, True or string on success, None on failure or timeout.
+        failed = False
+        if self._reused:
+            # if connection is reused, then there might be left over bytes in the
+            # read buffer. flush them.
+            try:
+                self._connection.reset()
+            except:
+                LOG.info("Failed to reset connection to %r", self.address, exc_info=True)
+                # close the connection, prepare for re-connect
+                self._close(terminate=True)
+                failed = True
 
-        if ret is None:
-            # failed, either because of IO error (socket closed) or timeout.
-            # if pool.can_detect_close is False and we are reusing the connection
-            # from the cache pool, then it was probably already closed when we got it.
-            # Re-get the connection from the pool again.
-            if not self.session.pool.can_detect_close and self._reused:
-                if LOG.isEnabledFor(logging.DEBUG):
-                    LOG.debug("Re-ensuring connection to address %r", self.address)
-                # we won't release it, ensure it is surely closed
-                self._connection.close()
-                self._open_connection(by_failure=True) # raises exception
-                if self.session.pool.use_cache_for_reconnects:
-                    if LOG.isEnabledFor(logging.DEBUG):
-                        LOG.debug("Re-connected using cached connection. IO-checking again: %r", self.address)
-                    # if ensuring logic is asking for a new connection from the pool,
-                    # then we have to re-ensure the connection.
-                    # we keep iterating like that untill our pool drains empty of
-                    # cached connections, after that we open new one and
-                    # self._reused becomes False.
-                    return self._ensuring_io(func)
-                else:
-                    if LOG.isEnabledFor(logging.DEBUG):
-                        LOG.debug("Re-connected using new connection. Issuing raw IO: %r", self.address)
-                    # ensuring logic was forced to open a fresh connection, which
-                    # is open by definition. If we fail, then this is a real failure.
-                    return func(self._connection)
-            else:
-                if LOG.isEnabledFor(logging.DEBUG):
-                    LOG.debug("IO failure to address %r. Not reconnecting.", self.address)
-        # successful response or we can't reopen connection
-        return ret
+        if not failed:
+            # OK, reset succeeded or this is a fresh new connetion
+            try:
+                return func(self._connection), None
+            except Exception as exc:
+                if self.session.pool.can_detect_close or not self._reused:
+                    # bubble up IO related problem on non-cached connection
+                    return None, exc
+
+        # Either failed by reset or failed by IO operation. If
+        # pool.can_detect_close is False and we are reusing the connection from
+        # the cache pool, then it was probably already failing when we got it.
+        # Re-get the connection from the pool again.
+        if LOG.isEnabledFor(logging.DEBUG):
+            LOG.debug("Re-opening connection to address %r", self.address)
+
+        # ensure failing connection is closed
+        self._close(terminate=True)
+        # open new connection. this operation might raise exceptions, which
+        # will propagate to the outer most caller indicating severe network
+        # errors.
+        self._open_connection(by_failure=True)
+        return self._ensuring_io(func)
 
     def _open_connection(self, by_failure=False):
         """ Request new connection handle from underlying pool. """
@@ -480,25 +535,6 @@ class Connection(object):
                 self.session.pool.release(self._connection)
 
             self._connection = None
-
-    def _read(self, connection, size, timeout):
-        """ Perform safe read. """
-        try:
-            return connection.read(size, timeout)
-        except:
-            LOG.warning("Read of %sb within %ss failed from %r", size, timeout, self.address, exc_info=True)
-            self._connection.close()
-            return None
-
-    def _write(self, connection, chunk, timeout):
-        """ Perform safe write. """
-        try:
-            connection.write(chunk, timeout)
-            return True
-        except:
-            LOG.warning("Write of %sb within %ss failed to %r", len(chunk), timeout, self.address, exc_info=True)
-            self._connection.close()
-            return None
 
 
 # private

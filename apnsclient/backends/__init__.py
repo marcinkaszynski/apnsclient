@@ -54,19 +54,15 @@ class BaseBackend(object):
         self.pool_size = pool_size
         self.use_cache_for_reconnects = use_cache_for_reconnects
         self._connections = {} # (address, certificate) -> [connection]
-        self._lock = self._create_lock()
+        self._lock = self.create_lock()
 
-    def _create_lock(self):
+    def get_certificate(self, cert_params):
+        """ Create/load certificate from parameters. """
+        raise NotImplementedError
+
+    def create_lock(self):
         """ Provides semaphore with ``threading.Lock`` interface. """
-        try:
-            # can be monkey patched by gevent/greenlet/etc or can be overriden
-            # entirely. The lock has to support .acquire() and .release() calls
-            # with standard semantics.
-            import threading as _threading
-        except ImportError:
-            import dummy_threading as _threading
-
-        return _threading.Lock()
+        raise NotImplementedError
 
     def get_cached_connection(self, address, certificate, timeout=None):
         """ Obtain connection from the pool. Opens new connection if no free
@@ -132,6 +128,11 @@ class BaseBackend(object):
             periodic task. If you don't, then all connections will remain open
             until session is shut down. It might be an issue if you care about
             your open server connections.
+
+            .. note::
+                This method doesn't touch connetions currently being in use,
+                even if you specify zero delta. It affects only unused
+                connections in the pool.
 
             :Arguments:
                 delta (datetime.timedelta): maximum age of unused connection.
@@ -211,30 +212,51 @@ class BaseConnection(object):
 
     def reset(self):
         """ Clear read and write buffers. Called before starting a new IO
-            session using a cached connection.
+            session using a cached connection. Prevents stale date from being
+            read during a new session.
         """
         raise NotImplementedError
 
     def write(self, data, timeout):
-        """ Write chunk of data. 
+        """ Write chunk of data. Either writes the whole sequence or fails with
+            an IO related exception. The exception should be raised if
+            connection is closed or not the whole data can be sent within given
+            timeout or any other IO error occurs.
 
             :Arguments:
                 - data (bytes): data to write.
-                - timeout (float): IO timeout for write operation, 0 is not allowed.
+                - timeout (float): IO timeout for write operation, None for unlimited blocking.
+        """
+        raise NotImplementedError
+
+    def peek(self, size):
+        """ Read chunk of data from the read buffer without blocking. Returns
+            not empty sequence of bytes or None if read buffer is empty. This
+            method is used to quickly look for a status frame while sending the
+            message block by block. If connection is closed, then method should
+            return None.
+
+            :Arguments:
+                - size (int): max number of bytes to read.
+
+            :Returns:
+                Not empty sequence of bytes or None if read buffer is empty or
+                connection is closed.
         """
         raise NotImplementedError
 
     def read(self, size, timeout):
-        """ Reach chunk of data. Returns read bytes or None if connection is
-            closed or nothing can be read within given timeout.
+        """ Read chunk of data. Returns not empty sequence of bytes while
+            blocking for at most timeout of seconds. Returns None if connection
+            is closed. Raises exception if not a single byte can be read within
+            given timeout or on any IO related failure.
 
             :Arguments:
                 - size (int): max number of bytes to read.
-                - timeout (float): IO timeout for read operation, 0 indicates non-blocking read.
+                - timeout (float): IO timeout for read operation, None if unlimited.
 
             :Returns:
-                Not empty sequence of bytes or None if connection has been closed
-                or data could not be read within given timeout.
+                Not empty sequence of bytes or None if connection has been closed.
         """
         raise NotImplementedError
 

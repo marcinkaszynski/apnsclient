@@ -56,12 +56,15 @@ class APNs(object):
 
             Example::
 
+                session = Session()
+                con = session.get_connection("push_production", cert_string=db_certificate)
                 message = Message(["token 1", "token 2"], alert="Message")
-                con = Session.get_connection("push_production", cert_string=db_certificate)
                 service = APNs(con)
                 try:
                     result = service.send(message)
-
+                except:
+                    print "Check your network, I could not connect to APN's"
+                else:
                     for token, (reason, explanation) in result.failed.items():
                         delete_token(token) # stop using that token
 
@@ -72,8 +75,6 @@ class APNs(object):
                         # extract failed tokens as new message
                         message = message.retry()
                         # re-schedule task with the new message after some delay
-                except:
-                    print "Check your network, I could not connect to APN's"
 
             :Returns:
                 :class:`Result` object with operation results.
@@ -108,7 +109,8 @@ class APNs(object):
 
             Example::
 
-                con = Session.new_connection("feedback_production", cert_string=db_certificate)
+                session = Session()
+                con = session.new_connection("feedback_production", cert_string=db_certificate)
                 service = APNs(con)
                 try:
                     # on any IO failure after successfull connection this generator

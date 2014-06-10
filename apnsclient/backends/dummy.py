@@ -16,13 +16,35 @@ import logging
 import time
 from struct import pack
 
+try:
+    import threading as _threading
+except ImportError:
+    import dummy_threading as _threading
+
 from . import BaseBackend, BaseConnection
+from ..certificate import BaseCertificate
 
 # python 3 support
 import six
 
 # module level logger
 LOG = logging.getLogger(__name__)
+
+
+class Certificate(BaseCertificate):
+    """ Dummy certificate """
+
+    def load_context(self, cert_string=None, cert_file=None, key_string=None, key_file=None, passphrase=None):
+        """ Returns None as we don't handle any context. """
+        return None, None
+
+    def dump_certificate(self, raw_certificate):
+        """ Returns dummy contents. All dummy certificates are equal. """
+        return "CERTIFICATE"
+
+    def dump_digest(self, raw_certificate, digest):
+        """ Returns dummy digsst. All dummy certificates are equal. """
+        return self.dump_certificate(raw_certificate)
 
 
 class Backend(BaseBackend):
@@ -55,7 +77,16 @@ class Backend(BaseBackend):
                 - timeout (float): connection timeout in seconds
         """
         self.new_connections += 1
+        self.push_result_pos += 1
         return Connection(self, address, certificate)
+
+    def get_certificate(self, cert_params):
+        """ Create/load certificate from parameters. """
+        return Certificate(**cert_params)
+
+    def create_lock(self):
+        """ Provides semaphore with ``threading.Lock`` interface. """
+        return _threading.Lock()
 
 
 class Connection(BaseConnection):
@@ -83,34 +114,30 @@ class Connection(BaseConnection):
 
     def reset(self):
         """ Reset dummy connection to use next result record. """
-        self.pool.push_result_pos += 1
-        return True
+        pass
 
     def write(self, data, timeout):
         """ Does nothing, always succeeds. """
-        return True
+        if self.closed():
+            raise IOError("Connection closed")
+    
+    def peek(self, size):
+        """ Always returns None as we never fail prematurely. """
+        return None
 
     def read(self, size, timeout):
-        """ Reach chunk of data. Returns read bytes or None on any failure or if
-            timeout is exceeded. If timeout is zero, then method is not allowed
-            to block, but has to return data available in the read buffer or fail
-            immediatelly.
-        """
+        """ Iterates over preconfigured send/feedback responses. """
         if self.closed():
             return None
 
         if self.pool.push_results is not None:
-            if timeout == 0:
-                # only report at the end
-                return None
-
             # we are push connection
             ret = self.pool.push_results[self.pool.push_result_pos % len(self.pool.push_results)]
-            if ret is None:
-                return six.binary_type()
-            
-            return pack(">BBI", 8, ret, 0)
-        else:
+            if ret is not None:
+                ret = pack(">BBI", 8, ret, 0)
+
+            return ret
+        else: # feedback mode
             ret = []
             for x in range(0, self.pool.feedback_results):
                 token = six.b("test_{}".format(x))
