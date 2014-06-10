@@ -35,18 +35,21 @@ class Session(object):
         "feedback_sandbox": ("feedback.sandbox.push.apple.com", 2196),
         "feedback_production": ("feedback.push.apple.com", 2196),
     }
+    # Default timeout for attempting a new connection.
+    DEFAULT_CONNECT_TIMEOUT = 10
     # Default write buffer size. Should be close to MTU size.
     DEFAULT_WRITE_BUFFER_SIZE = 2048
     # Default timeout for write operations.
-    DEFAULT_WRITE_TIMEOUT = 10
+    DEFAULT_WRITE_TIMEOUT = 20
     # Default read buffer size, used by feedback.
     DEFAULT_READ_BUFFER_SIZE = 2048
     # Default timeout for read operations.
-    DEFAULT_READ_TIMEOUT = 10
+    DEFAULT_READ_TIMEOUT = 20
     # Default timeout waiting for error response at the end message send operation.
     DEFAULT_READ_TAIL_TIMEOUT = 1
     
     def __init__(self, pool="apnsclient.backends.stdio",
+                       connect_timeout=DEFAULT_CONNECT_TIMEOUT,
                        write_buffer_size=DEFAULT_WRITE_BUFFER_SIZE,
                        write_timeout=DEFAULT_WRITE_TIMEOUT,
                        read_buffer_size=DEFAULT_READ_BUFFER_SIZE,
@@ -60,6 +63,7 @@ class Session(object):
 
             :Arguments:
                 - pool (str, type or object): networking layer implementation.
+                - connect_timeout (float): timeout for new connections.
                 - write_buffer_size (int): chunk size for sending the message.
                 - write_timeout (float): maximum time to send single chunk in seconds.
                 - read_buffer_size (int): feedback buffer size for reading.
@@ -68,6 +72,7 @@ class Session(object):
                 - pool_options (kwargs): passed as-is to the pool class on instantiation.
         """
         # IO deafults
+        self.connect_timeout = connect_timeout
         self.write_buffer_size = write_buffer_size
         self.write_timeout = write_timeout
         self.read_buffer_size = read_buffer_size
@@ -100,6 +105,7 @@ class Session(object):
                       read_tail_timeout,
                       pool.__class__.__module__)
 
+    @classmethod
     def get_address(cls, address):
         """ Maps address to (host, port) tuple. """
         if not isinstance(address, (list, tuple)):
@@ -235,9 +241,6 @@ class Connection(object):
             self._lock.acquire() # block until lock is given
             self._open_connection()
         except:
-            if LOG.isEnabledFor(logging.DEBUG):
-                LOG.debug("Failed to enter networking session to address: %r", self.address, exc_info=True)
-
             self._lock.release()
             raise
 
@@ -257,13 +260,8 @@ class Connection(object):
 
     def send(self, message):
         """ Send message. """
+        # will raise exception if non-cached connection has been used
         with self:
-            if not self._connection:
-                if LOG.isEnabledFor(logging.INFO):
-                    LOG.info("Failed to obtain message connection to address %r", self.address)
-                # general error from the first token
-                return (255, 0)
-
             batch = message.batch(self.session.write_buffer_size)
             failed_after = None
             first = True
@@ -276,11 +274,13 @@ class Connection(object):
 
                 if first:
                     # first IO, that may trigger connection reinitialization
-                    ret = self._ensuring_io(lambda con: con.write(chunk, self.session.write_timeout))
+                    # will raise exception if cached connection has been used,
+                    # it appeared closed and the reconnect has been failed.
+                    ret = self._ensuring_io(lambda con: self._write(con, chunk, self.session.write_timeout))
                     first = False
                 else:
                     # other writes, that fail naturally
-                    ret = self._connection.write(chunk, self.session.write_timeout)
+                    ret = self._write(self._connection, chunk, self.session.write_timeout)
 
                 if ret is None:
                     # socket is closed, check what happened
@@ -288,7 +288,7 @@ class Connection(object):
                     break
 
                 # non-blocking read
-                ret = self._connection.read(256, 0) # status frame is 6 bytes
+                ret = self._read(self._connection, 256, 0) # status frame is 6 bytes
                 if ret is not None:
                     decoder.feed(ret)
                     # NOTE: status can be overriden on status.code == 0 :: No errors
@@ -311,21 +311,38 @@ class Connection(object):
 
             # status, only success or None.
             # status frame not yet received, blocking read for at most tail_timeout
-            if status is None:
-                ret = self._connection.read(256, self.session.read_tail_timeout)
-                if ret:
-                    decoder.feed(ret)
-                    status = decoder.decode()
-                    if status is not None and status[0] != 0:
-                        if LOG.isEnabledFor(logging.INFO):
-                            LOG.info("Message send failed with status %r to address %r. Bytes sent: %s",
-                                     status, self.address, total_sent)
+            if status is None and self._connection:
+                # read status frame, could take 2 iterations if the fist one returns
+                # just the read buffer with few bytes not making the whole status frame.
+                while True:
+                    ret = self._read(self._connection, 256, self.session.read_tail_timeout)
+                    if ret:
+                        decoder.feed(ret)
+                        status = decoder.decode()
+                        if status is None:
+                            # not enough data read to construct complete status frame
+                            continue
 
-                        # some shit had indeed happened
-                        self._close(terminate=True)
-                        return status
-                # else: failed to read status frame, probably because of the timeout,
-                # which means transaction is probably ended successfully. APNs sucks.
+                        # complete status frame read, evaluate
+                        if status[0] != 0:
+                            if LOG.isEnabledFor(logging.INFO):
+                                LOG.info("Message send failed with status %r to address %r. Bytes sent: %s",
+                                         status, self.address, total_sent)
+
+                            # some shit had indeed happened
+                            self._close(terminate=True)
+                            return status
+
+                        # status is OK (which is part of APNs protocol, but in
+                        # documentation they say it isn't used). however, it is
+                        # possible that our sending loop ended prematurely with
+                        # failed_after set. break and evaluate further.
+                        break
+                    else:
+                        # failed to read status frame, probably because of the
+                        # timeout, which means transaction is probably ended
+                        # successfully. APNs sucks. still we have to check failed_after.
+                        break
 
             # normall successs scenario with success frame provided.
             if failed_after is None and status is not None and status[0] == 0:
@@ -356,41 +373,45 @@ class Connection(object):
             return None
 
     def feedback(self):
-        """ Read and parse feedback information. On failure stop iteration. """
+        """ Read and parse feedback information. """
+        # will raise exception if non-cached connection has been used
         with self:
-            if self._connection:
-                # first frame, ensuring connection
-                data = self._ensuring_io(lambda con: con.read(self.session.read_buffer_size, self.session.read_timeout))
-                feedback = FeedbackDecoder()
-                total_records = 0
-                while data is not None:
-                    feedback.feed(data)
-                    # TODO: use yield from
-                    for record in feedback.decoded():
-                        total_records += 1
-                        yield record
+            # first frame, ensuring connection
+            # will raise exception if cached connection has been used, it appeared
+            # closed and the reconnect has been failed.
+            data = self._ensuring_io(lambda con: self._read(con, self.session.read_buffer_size, self.session.read_timeout))
+            feedback = FeedbackDecoder()
+            total_records = 0
+            while data is not None:
+                feedback.feed(data)
+                # TODO: use yield from
+                for record in feedback.decoded():
+                    total_records += 1
+                    yield record
 
-                    # read next chunk
-                    data = self._connection.read(self.session.read_buffer_size, self.session.read_timeout)
+                # read next chunk
+                data = self._read(self._connection, self.session.read_buffer_size, self.session.read_timeout)
 
-                # there is no point to keep this connection open
-                if LOG.isEnabledFor(logging.DEBUG):
-                    LOG.debug("Feedback received %s records from address %r",
-                             total_records, self.address)
+            # there is no point to keep this connection open
+            if LOG.isEnabledFor(logging.DEBUG):
+                LOG.debug("Feedback received %s records from address %r",
+                         total_records, self.address)
 
-                self._close(terminate=True)
-            else:
-                if LOG.isEnabledFor(logging.INFO):
-                    LOG.info("Failed to obtain feedback connection to address %r", self.address)
-                # stop iterating, could not obtain connection
+            self._close(terminate=True)
 
     def _ensuring_io(self, func):
         """ Re-opens connection if read or write has failed. Used to re-initialize
             connections from the pool with a transport not supporting reliable
             socket closed condition.
         """
-        ret = self._connection.reset()  # clear read and write buffers
-        if ret:
+        try:
+            self._connection.reset()  # clear read and write buffers
+        except:
+            LOG.info("Failed to reset connection to %r", self.address, exc_info=True)
+            self._connection.close()
+            ret = None
+        else:
+            # OK, perform first IO
             ret = func(self._connection) # perform IO, True or string on success, None on failure or timeout.
 
         if ret is None:
@@ -403,12 +424,15 @@ class Connection(object):
                     LOG.debug("Re-ensuring connection to address %r", self.address)
                 # we won't release it, ensure it is surely closed
                 self._connection.close()
-                self._open_connection(by_failure=True)
+                self._open_connection(by_failure=True) # raises exception
                 if self.session.pool.use_cache_for_reconnects:
                     if LOG.isEnabledFor(logging.DEBUG):
                         LOG.debug("Re-connected using cached connection. IO-checking again: %r", self.address)
                     # if ensuring logic is asking for a new connection from the pool,
                     # then we have to re-ensure the connection.
+                    # we keep iterating like that untill our pool drains empty of
+                    # cached connections, after that we open new one and
+                    # self._reused becomes False.
                     return self._ensuring_io(func)
                 else:
                     if LOG.isEnabledFor(logging.DEBUG):
@@ -430,24 +454,51 @@ class Connection(object):
             if LOG.isEnabledFor(logging.DEBUG):
                 LOG.debug("Open cached connection to %r%s.", self.address, " by failure" if by_failure else "")
 
-            self._connection = self.session.pool.get_cached_connection(self.address, self.certificate)
+            self._connection = self.session.pool.get_cached_connection(
+                self.address,
+                self.certificate,
+                timeout=self.session.connect_timeout
+            )
             self._reused = True
         else:
             if LOG.isEnabledFor(logging.DEBUG):
                 LOG.debug("Open new connection to %r%s.", self.address, " by failure" if by_failure else "")
 
-            self._connection = self.session.pool.get_new_connection(self.address, self.certificate)
+            self._connection = self.session.pool.get_new_connection(
+                self.address,
+                self.certificate,
+                timeout=self.session.connect_timeout
+            )
             self._reused = False
 
     def _close(self, terminate=False):
         """ Close connection. """
-        assert self._connection is not None
-        if terminate:
-            self._connection.close()
-        else:
-            self.session.pool.release(self._connection)
+        if self._connection:
+            if terminate:
+                self._connection.close()
+            else:
+                self.session.pool.release(self._connection)
 
-        self._connection = None
+            self._connection = None
+
+    def _read(self, connection, size, timeout):
+        """ Perform safe read. """
+        try:
+            return connection.read(size, timeout)
+        except:
+            LOG.warning("Read of %sb within %ss failed from %r", size, timeout, self.address, exc_info=True)
+            self._connection.close()
+            return None
+
+    def _write(self, connection, chunk, timeout):
+        """ Perform safe write. """
+        try:
+            connection.write(chunk, timeout)
+            return True
+        except:
+            LOG.warning("Write of %sb within %ss failed to %r", len(chunk), timeout, self.address, exc_info=True)
+            self._connection.close()
+            return None
 
 
 # private

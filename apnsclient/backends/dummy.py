@@ -29,6 +29,8 @@ class Backend(BaseBackend):
     """ Dummy backend designed for testing without performing real IO. Serves
         as an exmple for your custom backends.
     """
+    # simulate stdio behavior
+    can_detect_close = False
 
     def __init__(self, push=None, feedback=None, **options):
         """ Create new backend.
@@ -44,12 +46,13 @@ class Backend(BaseBackend):
         self.new_connections = 0
         assert (push is not None) ^ (feedback is not None), "Push results or feedback stream must be provided"
 
-    def get_new_connection(self, address, certificate):
+    def get_new_connection(self, address, certificate, timeout=None):
         """ Open a new connection.
         
             :Arguments:
                 - address (tuple): target (host, port).
-                - certificate (:class:Certificate): certificate instance.
+                - certificate (:class:`Certificate`): certificate instance.
+                - timeout (float): connection timeout in seconds
         """
         self.new_connections += 1
         return Connection(self, address, certificate)
@@ -69,29 +72,22 @@ class Connection(BaseConnection):
         super(Connection, self).__init__(address, certificate)
         self.pool = pool
         self._closed = False
-        self._result = -1
 
     def closed(self):
-        """ Returns True if connection is closed via explicit ``close()`` call.
-            If ``backend.can_detect_close`` is False, then this method is allowed
-            to return False even if underlying connection has been closed by itself.
-        """
+        """ Returns True if :func:`close` has been explicitly called. """
         return self._closed
 
     def close(self):
-        """ Close connection and free underlying resources. """
+        """ Marks this connection as closed. """
         self._closed = True
 
     def reset(self):
-        """ Clear read and write buffers. Called before starting a new IO session. """
-        self._result += 1
+        """ Reset dummy connection to use next result record. """
         self.pool.push_result_pos += 1
+        return True
 
     def write(self, data, timeout):
-        """ Write chunk of data. Returns True`if data is completely written,
-            otherwise returns None indicating IO failure or that timeout has
-            been exceeded.
-        """
+        """ Does nothing, always succeeds. """
         return True
 
     def read(self, size, timeout):
@@ -111,13 +107,13 @@ class Connection(BaseConnection):
             # we are push connection
             ret = self.pool.push_results[self.pool.push_result_pos % len(self.pool.push_results)]
             if ret is None:
-                return six.b("")
+                return six.binary_type()
             
             return pack(">BBI", 8, ret, 0)
         else:
             ret = []
-            for x in xrange(0, self.pool.feedback_results):
-                token = six.b("test_{}").format(x)
+            for x in range(0, self.pool.feedback_results):
+                token = six.b("test_{}".format(x))
                 ret.append(pack(">IH{}s".format(len(token)), int(time.time()), len(token), token))
 
             self.close()

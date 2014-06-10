@@ -47,23 +47,33 @@ class APNs(object):
             returns :class:`Result` object, which you can examine for possible
             errors and retry attempts.
 
+            .. note::
+                If the client fails to connect to APNs, probably because your
+                network is down, then this method will raise the related
+                exception. However, if connection is successfully established,
+                but later on the IO fails, then this method will prepare a
+                retry message with the rest of the failed tokens.
+
             Example::
 
                 message = Message(["token 1", "token 2"], alert="Message")
                 con = Session.get_connection("push_production", cert_string=db_certificate)
                 service = APNs(con)
-                result = service.send(message)
+                try:
+                    result = service.send(message)
 
-                for token, (reason, explanation) in result.failed.items():
-                    delete_token(token) # stop using that token
+                    for token, (reason, explanation) in result.failed.items():
+                        delete_token(token) # stop using that token
 
-                for reason, explanation in result.errors:
-                    pass # handle generic errors
+                    for reason, explanation in result.errors:
+                        pass # handle generic errors
 
-                if result.needs_retry():
-                    # extract failed tokens as new message
-                    message = message.retry()
-                    # re-schedule task with the new message after some delay
+                    if result.needs_retry():
+                        # extract failed tokens as new message
+                        message = message.retry()
+                        # re-schedule task with the new message after some delay
+                except:
+                    print "Check your network, I could not connect to APN's"
 
             :Returns:
                 :class:`Result` object with operation results.
@@ -89,25 +99,33 @@ class APNs(object):
             method will automatically close the connection.
 
             .. note::
-                On any failure this method will simply stop iteration as if the
-                stream has been ended. There is no need to handle any error
-                scenario. If you keep sending messages to invalid tokens, then
-                these will appear again in the feedback stream.
+                If the client fails to connect to APNs, probably because your
+                network is down, then this method will raise the related
+                exception. However, if connection is successfully established,
+                but later on the IO fails, then this method will simply stop
+                iterating. The rest of the failed tokens will be delivered
+                during the next feedback session.
 
             Example::
 
                 con = Session.new_connection("feedback_production", cert_string=db_certificate)
                 service = APNs(con)
-                for token, when in service.feedback():
-                    # every time a devices sends you a token, you should store
-                    # {token: given_token, last_update: datetime.datetime.now()}
-                    last_update = get_last_update_of_token(token)
+                try:
+                    # on any IO failure after successfull connection this generator
+                    # will simply stop iterating. you will pick the rest of the tokens
+                    # during next feedback session.
+                    for token, when in service.feedback():
+                        # every time a devices sends you a token, you should store
+                        # {token: given_token, last_update: datetime.datetime.now()}
+                        last_update = get_last_update_of_token(token)
 
-                    if last_update < when:
-                        # the token wasn't updated after the failure has
-                        # been reported, so the token is invalid and you should
-                        # stop sending messages to it.
-                        remove_token(token)
+                        if last_update < when:
+                            # the token wasn't updated after the failure has
+                            # been reported, so the token is invalid and you should
+                            # stop sending messages to it.
+                            remove_token(token)
+                except:
+                    print "Check your network, I could not connect to APN's"
 
             :Returns:
                 generator over ``(binary, datetime)``

@@ -14,6 +14,9 @@
 #
 import datetime
 
+# python 3 support
+import six
+
 
 class BaseBackend(object):
     """ Interface definition for IO backends. """
@@ -65,13 +68,14 @@ class BaseBackend(object):
 
         return _threading.Lock()
 
-    def get_cached_connection(self, address, certificate):
-        """ Obtain connection from the pool. Opens new connection if nothing
-            is found in the pool.
+    def get_cached_connection(self, address, certificate, timeout=None):
+        """ Obtain connection from the pool. Opens new connection if no free
+            connection is found.
 
             :Arguments:
                 - address (tuple): target (host, port).
                 - certificate (:class:`Certificate`): certificate instance.
+                - timeout (float): connection timeout in seconds
         """
         key = (address, certificate)
         try:
@@ -85,7 +89,7 @@ class BaseBackend(object):
         finally:
             self._lock.release()
 
-        return self.get_new_connection(address, certificate)
+        return self.get_new_connection(address, certificate, timeout=timeout)
 
     def release(self, connection):
         """ Release connection. Method stores connection in the pool if pool
@@ -110,12 +114,13 @@ class BaseBackend(object):
             # pool is larger than the optimal size, close surplus connection
             connection.close()
 
-    def get_new_connection(self, address, certificate):
+    def get_new_connection(self, address, certificate, timeout=None):
         """ Open a new connection.
         
             :Arguments:
                 - address (tuple): target (host, port).
-                - certificate (:class:Certificate): certificate instance.
+                - certificate (:class:`Certificate`): certificate instance.
+                - timeout (float): connection timeout in seconds
         """
         raise NotImplementedError
 
@@ -129,11 +134,11 @@ class BaseBackend(object):
             your open server connections.
 
             :Arguments:
-                delta (``timedelta``): maximum age of unused connection.
+                delta (datetime.timedelta): maximum age of unused connection.
         """
         try:
             self._lock.acquire()
-            for key, pool in self._connections.items():
+            for key, pool in list(six.iteritems(self._connections)):
                 new_pool = []
                 for con in pool:
                     if not con.closed():
@@ -150,7 +155,7 @@ class BaseBackend(object):
             self._lock.release()
 
     def __del__(self):
-        """ Close conections ond destruction. """
+        """ Close conections on destruction. """
         self.outdate(datetime.timedelta())
 
 
@@ -182,81 +187,54 @@ class BaseConnection(object):
 
             .. warning::
                 This method is not allowed to throw any exceptions, except
-                those that indicate catestrophic events (such as
+                those that indicate catastrophic events (such as
                 out-of-memory). On any IO related failure this method should
                 always return True.
 
             :Returns:
                 True if connection is closed or check has been failed, otherwise
-                returns True.
+                returns False.
         """
         raise NotImplementedError
 
     def close(self):
-        """ Close connection and free underlying resources.
+        """ Close connection and free underlying resources. Does nothing if
+            connection is already closed.
             
             .. warning::
                 This method is not allowed to throw any exceptions, except
-                those that indicate catestrophic events (such as
+                those that indicate catastrophic events (such as
                 out-of-memory). On any IO related failure this method should
                 simply supress the problem and set :func:`closed` state True.
         """
         raise NotImplementedError
 
     def reset(self):
-        """ Clear read and write buffers. Called before starting a new IO session
-            using a cached connection.
-        
-            .. warning::
-                This method is not allowed to throw any exceptions, except
-                those that indicate catestrophic events (such as
-                out-of-memory). On any IO related failure this method should
-                always return None.
-            
-            :Returns:
-                None in case of any failure, True otherwise.
+        """ Clear read and write buffers. Called before starting a new IO
+            session using a cached connection.
         """
         raise NotImplementedError
 
     def write(self, data, timeout):
-        """ Write chunk of data. Returns True if data is completely written,
-            otherwise returns None indicating IO failure or that timeout has
-            been exceeded.
-
-            .. warning::
-                This method is not allowed to throw any exceptions, except
-                those that indicate catestrophic events (such as
-                out-of-memory). On any IO related failure this method should
-                always return None.
+        """ Write chunk of data. 
 
             :Arguments:
                 - data (bytes): data to write.
                 - timeout (float): IO timeout for write operation, 0 is not allowed.
-
-            :Returns:
-                None in case of any failure or IO timeout, True otherwise.
         """
         raise NotImplementedError
 
     def read(self, size, timeout):
-        """ Reach chunk of data. Returns read bytes or None on any failure or if
-            timeout is exceeded. If timeout is zero, then method is not allowed
-            to block, but has to return data available in the read buffer or fail
-            immediatelly.
-
-            .. warning::
-                This method is not allowed to throw any exceptions, except
-                those that indicate catestrophic events (such as
-                out-of-memory). On any IO related failure this method should
-                always return None.
+        """ Reach chunk of data. Returns read bytes or None if connection is
+            closed or nothing can be read within given timeout.
 
             :Arguments:
                 - size (int): max number of bytes to read.
                 - timeout (float): IO timeout for read operation, 0 indicates non-blocking read.
 
             :Returns:
-                Not empty sequence of bytes or None if data could not be read with
-                given timeout.
+                Not empty sequence of bytes or None if connection has been closed
+                or data could not be read within given timeout.
         """
         raise NotImplementedError
 
