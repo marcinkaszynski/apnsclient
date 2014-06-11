@@ -16,7 +16,7 @@ setup(
     url='https://bitbucket.org/sardarnl/apns-client',
     description='Python client for Apple Push Notification service (APNs)',
     long_description=read('README.rst'),
-    packages=['apnsclient'],
+    packages=['apnsclient', 'apnsclient.backends'],
     license="Apache 2.0",
     keywords='apns push notification apple messaging iOS',
     install_requires=['pyOpenSSL', 'six'],
