@@ -248,6 +248,7 @@ class Connection(object):
     def send(self, message):
         """ Send message. """
         # will raise exception if non-cached connection has been used
+        import ipdb; ipdb.set_trace()
         with self:
             batch = message.batch(self.session.write_buffer_size)
             failed_after = None
@@ -420,6 +421,7 @@ class Connection(object):
 
     def feedback(self):
         """ Read and parse feedback information. """
+        import ipdb; ipdb.set_trace()
         if self.use_cache:
             # sanity check
             LOG.warning("Don't use cached connections for feedback, you might get stale data.")

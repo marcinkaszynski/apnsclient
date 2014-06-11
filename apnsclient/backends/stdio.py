@@ -292,6 +292,24 @@ class Connection(BaseConnection):
         pending = self._connection.pending()
         if pending > 0:
             return self._connection.recv(min(pending, size))
+        else:
+            # do not trust pyOpenSSL, that piece of crap never sets pending buffer.
+            canread, _, _ = select.select((self._socket, ), (), (), 0) # poll
+            if canread:
+                self._connection.setblocking(0)
+                self._socket.settimeout(0)
+                try:
+                    ret = self._connection.recv(size)
+                    if not ret:
+                        ret = None
+
+                    return ret
+                except OpenSSL.SSL.ZeroReturnError:
+                    # nice end of stream
+                    return None
+                except OpenSSL.SSL.WantReadError:
+                    # no data is available yet
+                    return None
 
         return None
 
