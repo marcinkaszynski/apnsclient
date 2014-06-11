@@ -13,7 +13,6 @@ to understand its architecture and all implications. This library hides most of
 the complex mechanics behind APNs protocol, but some aspects, such as
 constructing the payload or interpreting the error codes is left to you.
 
-
 Usage
 -----
 
@@ -24,11 +23,11 @@ reference to it to prevent it being garbage collected. Example::
     from apnsclient import *
 
     # For feedback or non-intensive messaging
-    con = Session.new_connection("feedback_sandbox", cert_file="sandbox.pem")
+    con = Session().new_connection("feedback_sandbox", cert_file="sandbox.pem")
 
     # Persistent connection for intensive messaging.
     # Keep reference to session instance in some class static/global variable,
-    # otherwise it willbe garbage collected and all connections will be closed.
+    # otherwise it will be garbage collected and all connections are closed.
     session = Session()
     con = session.get_connection("push_sandbox", cert_file="sandbox.pem")
 
@@ -41,21 +40,24 @@ established once you actually use it. Example of sending a message::
 
     # Send the message.
     srv = APNs(con)
-    res = srv.send(message)
+    try:
+        res = srv.send(message)
+    except:
+        print "Can't connect to APNs, looks like network is down"
+    else:
+        # Check failures. Check codes in APNs reference docs.
+        for token, reason in res.failed.items():
+            code, errmsg = reason
+            print "Device failed: {0}, reason: {1}".format(token, errmsg)
 
-    # Check failures. Check codes in APNs reference docs.
-    for token, reason in res.failed.items():
-        code, errmsg = reason
-        print "Device failed: {0}, reason: {1}".format(token, errmsg)
+        # Check failures not related to devices.
+        for code, errmsg in res.errors:
+            print "Error: {}".format(errmsg)
 
-    # Check failures not related to devices.
-    for code, errmsg in res.errors:
-        print "Error: ", errmsg
-
-    # Check if there are tokens that can be retried
-    if res.needs_retry():
-        # repeat with retry_message or reschedule your task
-        retry_message = res.retry()
+        # Check if there are tokens that can be retried
+        if res.needs_retry():
+            # repeat with retry_message or reschedule your task
+            retry_message = res.retry()
 
 
 APNs protocol is notoriously badly designed. It wasn't possible to detect which
@@ -81,7 +83,7 @@ regularly. Example::
 
     # Shutdown session if you want to close all connections. The method will wait
     # until all concurrent threads stop using connections.
-    ses.shutdown()
+    session.shutdown()
 
 You have to regularly check feedback service for any invalid tokens. Schedule
 it on some kind of periodic task. Any reported token should be removed from
@@ -89,14 +91,15 @@ your database, unless you know the token has been re-registered again.
 Example::
 
     # feedback needs no persistent connections.
-    con = Session.new_connection("feedback_sandbox", cert_file="sandbox.pem")
+    con = Session().new_connection("feedback_sandbox", cert_file="sandbox.pem")
+    srv = APNs(con)
 
-    # feedback server might be slow, so allow it to time out in 10 seconds
-    srv = APNs(con, tail_timeout=10)
-
-    # automatically closes connection for you
-    for token, since in srv.feedback():
-        print "Token {0} is unavailable since {1}".format(token, since)
+    try:
+        # automatically closes connection for you
+        for token, since in srv.feedback():
+            print "Token {0} is unavailable since {1}".format(token, since)
+    except:
+        print "Can't connect to APNs, looks like network is down"
 
 
 The ``APNs.feedback()`` may fail with IO errors, in this case the feedback
