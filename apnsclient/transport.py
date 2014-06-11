@@ -434,7 +434,7 @@ class Connection(object):
 
             feedback = FeedbackDecoder()
             total_records = 0
-            failed = io_exception is None
+            failed = io_exception is not None
             while data is not None:
                 feedback.feed(data)
                 # TODO: use yield from

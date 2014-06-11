@@ -13,6 +13,8 @@
 # limitations under the License.
 
 import logging
+import time
+import select
 import socket
 import OpenSSL
 
@@ -37,7 +39,7 @@ class Certificate(BaseCertificate):
     def load_context(self, cert_string=None, cert_file=None, key_string=None, key_file=None, passphrase=None):
         """ Initialize and load certificate context. """
         context = OpenSSL.SSL.Context(OpenSSL.SSL.SSLv3_METHOD)
-        if not isinstance(passphrase, six.binary_type):
+        if passphrase is not None and not isinstance(passphrase, six.binary_type):
             passphrase = six.b(passphrase)
         
         if cert_file:
@@ -206,7 +208,7 @@ class Connection(BaseConnection):
 
             try:
                 # shutdown IO
-                self._socket.shutdown()
+                self._socket.shutdown(socket.SHUT_RDWR)
             except:
                 pass
             try:
@@ -231,48 +233,113 @@ class Connection(BaseConnection):
 
         # FIXME: pyOpenSSL can't block with the socket if timeout is set to
         # any value except None. So it is either block forewer or immediate
-        # WantReadError without waiting at all. we have to use select() blocking
-        
-        
+        # WantReadError without waiting at all. we have to use select() for
+        # blocking.
         self._connection.setblocking(1)
-        self._socket.settimeout(timeout)
-        try:
-            self._connection.sendall(data)
-        except OpenSSL.SSL.WantWriteError:
-            LOG.warning("Write timeout %s it too short for buffer %s", timeout, len(data), exc_info=True)
-            raise
+        self._socket.settimeout(timeout)  # None will set blocking mode
+        waited = 0
+        while True:
+            try:
+                # usually socket accepts any data regardless of network state.
+                # it simply stays in the output buffer, which we can't flush
+                # unless we disable Nagle algorithm entirely.
+                if timeout is not None:
+                    before = time.time()
+                    sent = self._connection.send(data)
+                    waited += time.time() - before
+                else: # save the time syscalls
+                    sent = self._connection.send(data)
+
+                if sent == len(data):
+                    return
+                elif sent > 0:
+                    data = data[sent:]
+                    if timeout is not None:
+                        # in case pyOpenSSL starts to actually wait timeouts
+                        if timeout - waited >= 0:
+                            self._socket.settimeout(timeout - waited)
+                            # updated timeout, try again
+                            continue
+                    else:
+                        # infinite timeout, keep trying
+                        continue
+            except OpenSSL.SSL.WantWriteError:
+                # looks like we are in blocking mode, but pyOpenSSL doesn't want
+                # to block or we are in a really short timeout.
+                if timeout is not None:
+                    waited += time.time() - before
+                    if timeout - waited > 0:
+                        before = time.time()
+                        _, canwrite, _ = select.select((), (self._socket, ), (), timeout - waited)
+                        waited += time.time() - before
+                        if canwrite and timeout - waited >= 0:
+                            # buffer ready for writing, try again
+                            self._socket.settimeout(timeout - waited)
+                            continue
+
+            # we come here if send() blocking works and we waited more than timeout
+            # or send() blocking doesn't work and we waited more than timeout
+            # or if timeout is None and we still got WantWriteError
+            LOG.warning("Write timeout %r it too short for buffer %s", timeout, len(data))
+            raise IOError("Timeout exceeded")
 
     def peek(self, size):
-        """ """
-        pass
+        """ Peek chunk of data from the read buffer. """
+        if self.closed():
+            return None
+
+        self._connection.setblocking(1)
+        pending = self._connection.pending()
+        if pending > 0:
+            return self._connection.recv(min(pending, size))
+
+        return None
 
     def read(self, size, timeout):
         """ Read chunk of data. """
         if self.closed():
             return None
 
-        if timeout == 0.0:
-            self._connection.setblocking(0)
-        else:
-            self._connection.setblocking(1)
-
-        self._socket.settimeout(timeout)
+        self._connection.setblocking(1)
+        self._socket.settimeout(timeout)  # None will set blocking mode
+        waited = 0
         while True:
             try:
-                ret = self._connection.recv(size)
+                if timeout is not None:
+                    before = time.time()
+                    ret = self._connection.recv(size)
+                    waited += time.time() - before
+                else: # save the time syscalls
+                    ret = self._connection.recv(size)
+
                 if not ret:
-                    # in case recv() responds with empty string on timeout.
-                    return None
+                    # in case recv() responds with empty string
+                    ret = None
+                
+                return ret
             except OpenSSL.SSL.ZeroReturnError:
-                # SSL connection has been closed by protocol. socket might be still
-                # open, so close everything.
-                return True
-            except OpenSSL.SSL.WantReadError:
-                # we can't receive anything within timeout, fail with empty value
+                # nice end of stream
                 return None
-            except:
-                self.close()
-                raise
+            except OpenSSL.SSL.WantReadError:
+                # either pyOpenSSL is failing without even trying to block
+                # or we really exceeded the timeout
+                if timeout is not None:
+                    waited += time.time() - before
+                    if timeout - waited > 0:
+                        before = time.time()
+                        canread, _, _ = select.select((self._socket, ), (), (), timeout - waited)
+                        waited += time.time() - before
+                        if canread and timeout - waited >= 0:
+                            # buffer ready for writing, try again
+                            self._socket.settimeout(timeout - waited)
+                            continue
+
+            # we come here if read raises WantReadError, which means normal blocking
+            # doesn't work or we really exceeded the timeout; timeout is None
+            # and we still got WantReadError, which is strange; we waited all
+            # time with select()
+            #LOG.warning("Read timeout %r it too short for buffer %s", timeout, size)
+            raise IOError("Timeout exceeded")
 
 
 class Backend(BaseBackend):
