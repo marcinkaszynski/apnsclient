@@ -56,14 +56,18 @@ class APNs(object):
 
             Example::
 
+                # if you use cached connections, then store this session instance
+                # somewhere global, such that it will not be garbage collected
+                # after message is sent.
                 session = Session()
+                # get a cached connection, avoiding unnecessary SSL handshake
                 con = session.get_connection("push_production", cert_string=db_certificate)
                 message = Message(["token 1", "token 2"], alert="Message")
                 service = APNs(con)
                 try:
                     result = service.send(message)
                 except:
-                    print "Check your network, I could not connect to APN's"
+                    print "Check your network, I could not connect to APNs"
                 else:
                     for token, (reason, explanation) in result.failed.items():
                         delete_token(token) # stop using that token
@@ -110,6 +114,7 @@ class APNs(object):
             Example::
 
                 session = Session()
+                # get non-cached connection, free from possible garbage
                 con = session.new_connection("feedback_production", cert_string=db_certificate)
                 service = APNs(con)
                 try:
@@ -127,7 +132,7 @@ class APNs(object):
                             # stop sending messages to it.
                             remove_token(token)
                 except:
-                    print "Check your network, I could not connect to APN's"
+                    print "Check your network, I could not connect to APNs"
 
             :Returns:
                 generator over ``(binary, datetime)``
@@ -160,7 +165,7 @@ class Message(object):
                  **extra_kwargs):
         """ The push notification to one or more device tokens.
 
-            Read more `about payload
+            Read more `about the payload
             <https://developer.apple.com/library/mac/documentation/NetworkingInternet/Conceptual/RemoteNotificationsPG/Chapters/ApplePushService.html#//apple_ref/doc/uid/TP40008194-CH100-SW1>`_.
 
             .. note::
@@ -175,12 +180,12 @@ class Message(object):
                 fields like alert or sound are not allowed.
 
             :Arguments:
-                - tokens (str or list): set of device tokens where to message will be sent.
+                - tokens (str or list): set of device tokens where to the message will be sent.
                 - alert (str or dict): the message; read APNs manual for recognized dict keys.
                 - badge (int or str): badge number over the application icon or special value such as "increment".
                 - sound (str): sound file to play on arrival.
                 - content_available (int): set to 1 to indicate new content is available.
-                - expiry (int or datetime or timedelta): timestamp when message will expire.
+                - expiry (int, datetime or timedelta): timestamp when message will expire.
                 - payload (dict or str): JSON-compatible dictionary with the
                    complete message payload. If supplied, it is given instead
                    of all the other, more specific parameters.
@@ -503,7 +508,7 @@ class Result(object):
                 - ``(4, "Missing payload")``
                 - ``(6, "Invalid topic size")``
                 - ``(7, "Invalid payload size")``
-                - ``(None, "Unknown")``
+                - ``(None, "Unknown")``, usually some kind of IO failure.
         """
         return self._errors
 

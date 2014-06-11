@@ -27,7 +27,7 @@ reference to it to prevent it being garbage collected. Example::
 
     # Persistent connection for intensive messaging.
     # Keep reference to session instance in some class static/global variable,
-    # otherwise it will be garbage collected and all connections are closed.
+    # otherwise it will be garbage collected and all connections will be closed.
     session = Session()
     con = session.get_connection("push_sandbox", cert_file="sandbox.pem")
 
@@ -48,6 +48,8 @@ established once you actually use it. Example of sending a message::
         # Check failures. Check codes in APNs reference docs.
         for token, reason in res.failed.items():
             code, errmsg = reason
+            # according to APNs protocol the token reported here
+            # is garbage (invalid or empty), stop using and remove it.
             print "Device failed: {0}, reason: {1}".format(token, errmsg)
 
         # Check failures not related to devices.
@@ -67,8 +69,8 @@ failure the ``retry()`` method will build a message with the rest of device
 tokens, that you can retry. Unlike GCM, you may retry it right away without any
 delay.
 
-If you don't like to keep your connections open for too long, then close them
-regularly. Example::
+If you don't like to keep your cached connections open for too long, then close
+them regularly. Example::
 
     import datetime
 
@@ -77,12 +79,12 @@ regularly. Example::
 
     # Close all connections that have not been used in the last delta time.
     # You may call this method at the end of your task or in a spearate periodic
-    # task. If you like threads, you may call it in a spearate maintenance
+    # task. If you use threads, you may call it in a spearate maintenance
     # thread.
     session.outdate(delta)
 
-    # Shutdown session if you want to close all connections. The method will wait
-    # until all concurrent threads stop using connections.
+    # Shutdown session if you want to close all unused cached connections.
+    # This call is equivalent to Session.outdate() with zero delta time.
     session.shutdown()
 
 You have to regularly check feedback service for any invalid tokens. Schedule
@@ -95,9 +97,19 @@ Example::
     srv = APNs(con)
 
     try:
-        # automatically closes connection for you
-        for token, since in srv.feedback():
-            print "Token {0} is unavailable since {1}".format(token, since)
+        # on any IO failure after successfull connection this generator
+        # will simply stop iterating. you will pick the rest of the tokens
+        # during next feedback session.
+        for token, when in service.feedback():
+            # every time a devices sends you a token, you should store
+            # {token: given_token, last_update: datetime.datetime.now()}
+            last_update = get_last_update_of_token(token)
+
+            if last_update < when:
+                # the token wasn't updated after the failure has
+                # been reported, so the token is invalid and you should
+                # stop sending messages to it.
+                remove_token(token)
     except:
         print "Can't connect to APNs, looks like network is down"
 

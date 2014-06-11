@@ -149,8 +149,8 @@ class Session(object):
 
                 - push_sanbox -- ``("gateway.sandbox.push.apple.com", 2195)``, the default.
                 - push_production -- ``("gateway.push.apple.com", 2195)``
-                - feedback_sandbox -- ``("gateway.push.apple.com", 2196)``
-                - feedback_production -- ``("gateway.sandbox.push.apple.com", 2196)``
+                - feedback_sandbox -- ``("feedback.sandbox.push.apple.com", 2196)``
+                - feedback_production -- ``("feedback.push.apple.com", 2196)``
 
             :Arguments:
                 - address (str or tuple): target address.
@@ -166,7 +166,8 @@ class Session(object):
         return Connection(address, cert, self, use_cache=True)
 
     def outdate(self, delta):
-        """ Close open connections that are not used in more than ``delta`` time.
+        """ Close open unused connections in the pool that are left untouched
+            for more than ``delta`` time.
 
             You may call this method in a separate thread or run it in some
             periodic task. If you don't, then all connections will remain open
@@ -248,7 +249,6 @@ class Connection(object):
     def send(self, message):
         """ Send message. """
         # will raise exception if non-cached connection has been used
-        import ipdb; ipdb.set_trace()
         with self:
             batch = message.batch(self.session.write_buffer_size)
             failed_after = None
@@ -421,7 +421,6 @@ class Connection(object):
 
     def feedback(self):
         """ Read and parse feedback information. """
-        import ipdb; ipdb.set_trace()
         if self.use_cache:
             # sanity check
             LOG.warning("Don't use cached connections for feedback, you might get stale data.")

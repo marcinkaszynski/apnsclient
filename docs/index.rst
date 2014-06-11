@@ -74,6 +74,7 @@ Contents:
    :maxdepth: 2
 
    intro
+   extend
    apnsclient
 
 
