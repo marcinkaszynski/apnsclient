@@ -1,3 +1,8 @@
+2014-06-17  Sardar Yumatov <ja.doma@gmail.com>
+    * version 0.2.1
+    * apnsclient/backends/stdio.py: fixed debug message format.
+    * apnsclient/backends/__init__.py: fixed garbage collection issue.
+
 2014-06-11  Sardar Yumatov  <ja.doma@gmail.com>
     * version 0.2
     * apnsclient/apns.py: total refactor, API is mostly backward compatible.
