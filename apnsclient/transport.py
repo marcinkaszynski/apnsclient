@@ -189,7 +189,10 @@ class Session(object):
         """ Shutdown all connections in the pool. This method does will not close
             connections being use at the calling time.
         """
-        self.pool.outdate(datetime.timedelta())
+        # NOTE: global package datetime can become None if session is stored in
+        # a global variable and being garbage collected with the rest of the module.
+        if datetime is not None:
+            self.pool.outdate(datetime.timedelta())
 
     def __del__(self):
         """ Last chance to shutdown() """

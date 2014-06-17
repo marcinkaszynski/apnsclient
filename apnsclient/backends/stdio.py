@@ -86,7 +86,7 @@ class Certificate(BaseCertificate):
                     key_string = fp.read()
             else:
                 if LOG.isEnabledFor(logging.DEBUG):
-                    LOG.debug("Private key provided as string % passphrase",
+                    LOG.debug("Private key provided as string %s passphrase",
                                 'with' if passphrase is not None else 'without')
 
             args = [OpenSSL.crypto.FILETYPE_PEM, key_string]

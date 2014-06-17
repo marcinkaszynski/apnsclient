@@ -157,7 +157,10 @@ class BaseBackend(object):
 
     def __del__(self):
         """ Close conections on destruction. """
-        self.outdate(datetime.timedelta())
+        # NOTE: global package datetime can become None if session is stored in
+        # a global variable and being garbage collected with the rest of the module.
+        if datetime is not None:
+            self.outdate(datetime.timedelta())
 
 
 class BaseConnection(object):
