@@ -213,7 +213,7 @@ class Message(object):
             self.badge = aps.get("badge")
             self.sound = aps.get("sound")
             self.content_available = aps.get("content-available")
-            self.extra = {k: v for k, v in six.iteritems(payload) if k != 'aps'}
+            self.extra = dict([(k, v) for (k, v) in six.iteritems(payload) if k != 'aps'])
         elif payload is None:
             # normal message initialization
             self.alert = alert
@@ -285,8 +285,8 @@ class Message(object):
                 'priority': self.priority,
             }
 
-        return {key: getattr(self, key) for key in ('tokens', 'alert', 'badge',
-                    'sound', 'content_available', 'expiry', 'priority', 'extra')}
+        return dict([(key, getattr(self, key)) for key in ('tokens', 'alert', 'badge',
+                    'sound', 'content_available', 'expiry', 'priority', 'extra')])
     
     def __setstate__(self, state):
         """ Overwrite message state with given kwargs. """
@@ -303,7 +303,7 @@ class Message(object):
                 self.badge = aps.get("badge")
                 self.sound = aps.get("sound")
                 self.content_available = aps.get("content-available")
-                self.extra = {k: v for k, v in six.iteritems(self._payload) if k != 'aps'}
+                self.extra = dict([(k, v) for (k, v) in six.iteritems(payload) if k != 'aps'])
         else:
             self._payload = None
             for key, val in six.iteritems(state):
