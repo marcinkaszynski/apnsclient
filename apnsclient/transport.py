@@ -564,7 +564,7 @@ class ResponseDecoder(object):
                 # should normally not happen as there is always a single frame
                 self._buf.append(buf[6:])
 
-            assert ret[0] == self.COMMAND, "Got unknown command from APNs: {}. Looks like protocol has been changed.".format(ret[0])
+            assert ret[0] == self.COMMAND, "Got unknown command from APNs: {0}. Looks like protocol has been changed.".format(ret[0])
             return (ret[1], ret[2])
         else:
             self._buf = [buf]

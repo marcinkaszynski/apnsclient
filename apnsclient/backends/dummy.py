@@ -140,8 +140,8 @@ class Connection(BaseConnection):
         else: # feedback mode
             ret = []
             for x in range(0, self.pool.feedback_results):
-                token = six.b("test_{}".format(x))
-                ret.append(pack(">IH{}s".format(len(token)), int(time.time()), len(token), token))
+                token = six.b("test_{0}".format(x))
+                ret.append(pack(">IH{0}s".format(len(token)), int(time.time()), len(token), token))
 
             self.close()
             return six.binary_type().join(ret)

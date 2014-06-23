@@ -27,8 +27,29 @@ from apnsclient.apns import Result
 from apnsclient.backends.dummy import Backend as DummyBackend
 
 
+class Python26Mixin(object):
+    """ Adds missing methods to test cases in Python 2.6 environment. """
 
-class APNsClientMessageTest(unittest.TestCase):
+    def assertLessEqual(self, first, second, msg=None):
+        """ Fail if the two objects are unequal as determined by the '<=' operator. """
+        parent = super(Python26Mixin, self)
+        if hasattr(parent, 'assertLessEqual'):
+            parent.assertLessEqual(first, second, msg)
+        else:
+            if not first <= second:
+                raise self.failureException(msg or '%r != %r' % (first, second))
+
+    def assertIsInstance(self, first, second, msg=None):
+        """ Fail if isinstance(first, second) does not evaluates to True. """
+        parent = super(Python26Mixin, self)
+        if hasattr(parent, 'assertIsInstance'):
+            parent.assertIsInstance(first, second, msg)
+        else:
+            if not isinstance(first, second):
+                raise self.failureException(msg or 'not isinstance(%r, %r)' % (first, second))
+
+
+class APNsClientMessageTest(Python26Mixin, unittest.TestCase):
     """ Test Message API. """
 
     def setUp(self):
@@ -190,7 +211,7 @@ class APNsClientMessageTest(unittest.TestCase):
             self.assertEqual(getattr(self.raw_message, key), getattr(r_raw_message, key))
 
 
-class APNsClientResultTest(unittest.TestCase):
+class APNsClientResultTest(Python26Mixin, unittest.TestCase):
     """ Test Result API. """
 
     def setUp(self):
@@ -209,7 +230,7 @@ class APNsClientResultTest(unittest.TestCase):
                 self.assertEqual(len(ret.tokens), 2 - len(res.failed) - int(reason == 10))
 
 
-class APNsDummyTest(unittest.TestCase):
+class APNsDummyTest(Python26Mixin, unittest.TestCase):
     """ Test APNs client with dummy backend. """
 
     def test_send(self):

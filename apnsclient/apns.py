@@ -303,7 +303,7 @@ class Message(object):
                 self.badge = aps.get("badge")
                 self.sound = aps.get("sound")
                 self.content_available = aps.get("content-available")
-                self.extra = dict([(k, v) for (k, v) in six.iteritems(payload) if k != 'aps'])
+                self.extra = dict([(k, v) for (k, v) in six.iteritems(self._payload) if k != 'aps'])
         else:
             self._payload = None
             for key, val in six.iteritems(state):

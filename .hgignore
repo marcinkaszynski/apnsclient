@@ -3,6 +3,7 @@ syntax: regexp
 # test virtualenv
 ^env/
 ^env3/
+^env26/
 
 # Sphinx docs
 ^docs/_build/

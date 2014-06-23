@@ -57,8 +57,20 @@ h3nbwhSfx2WC3bN8Gs8G9pJV9LGiBY2y2zANYTrq7Mv3iVLkHY8BQIUYQuiUnT20
 PRIVATE_PASS= "test"
 
 
+class Python26Mixin(object):
+    """ Adds missing methods to test cases in Python 2.6 environment. """
 
-class StdIOBackendTest(unittest.TestCase):
+    def assertIsNotNone(self, value, msg=None):
+        """ Fail if value is None. """
+        parent = super(Python26Mixin, self)
+        if hasattr(parent, 'assertIsNotNone'):
+            parent.assertIsNotNone(value, msg)
+        else:
+            if value is None:
+                raise self.failureException(msg or '%r is None' % value)
+
+
+class StdIOBackendTest(Python26Mixin, unittest.TestCase):
     """ Test stdio features. """
 
     def setUp(self):
