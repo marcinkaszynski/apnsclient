@@ -16,7 +16,14 @@ import logging
 import time
 import select
 import socket
-import OpenSSL
+import os
+
+if os.environ.get('USE_GEVENT_OPENSSL'):
+    import OpenSSL
+    from gevent_openssl.SSL import Connection as SSLConnection
+else:
+    import OpenSSL
+    from OpenSSL.SSL import Connection as SSLConnection
 
 try:
     import threading as _threading
@@ -171,7 +178,7 @@ class Connection(BaseConnection):
         ctx = self.certificate.get_context()
         if self._timeout is not None:
             ctx.set_timeout(int(self._timeout))
-        return OpenSSL.SSL.Connection(ctx, self._socket)
+        return SSLConnection(ctx, self._socket)
 
     def _configure_connection(self):
         """ Hookt to configure SSL connection. """
