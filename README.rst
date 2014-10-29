@@ -1,3 +1,8 @@
+**NOTE**: this repository is a fork made in effort to extend the
+functionality in the direction required by my projects.  You can find
+the original at https://bitbucket.org/sardarnl/apns-client
+
+
 apns-client.
 ====================================
 Python client for `Apple Push Notification service (APNs) <https://developer.apple.com/library/mac/documentation/NetworkingInternet/Conceptual/RemoteNotificationsPG/Chapters/ApplePushService.html>`_.
